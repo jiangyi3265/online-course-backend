@@ -55,9 +55,9 @@ jobs:
           set -euo pipefail
           test -f "ruoyi-admin/target/$APP_NAME"
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          SCP_OPTS="-i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/$APP_NAME.tmp"
+          timeout 90s scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/$APP_NAME.tmp"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
 
       - name: Restart service
