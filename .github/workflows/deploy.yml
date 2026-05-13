@@ -74,6 +74,45 @@ jobs:
           mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
           REMOTE
 
+      - name: Ensure database
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "SRC_DIR='$SRC_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          get_mysql_root_password() {
+            python3 - <<'PY'
+          import os, re, subprocess, sys
+          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
+          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
+          if not os.path.exists(log):
+              sys.exit(1)
+          text = open(log, errors="ignore").read()
+          for match in re.finditer(pattern, text):
+              password = match.group(1).strip()
+              if not (3 <= len(password) <= 80):
+                  continue
+              env = os.environ.copy()
+              env["MYSQL_PWD"] = password
+              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if result.returncode == 0:
+                  print(password)
+                  sys.exit(0)
+          sys.exit(1)
+          PY
+          }
+
+          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password)"
+          DB_EXISTS="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "show databases like 'ha'" || true)"
+          if [ "$DB_EXISTS" != "ha" ]; then
+            test -f "$SRC_DIR/sql/ry_20250522.sql"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "create database ha default character set utf8mb4 collate utf8mb4_general_ci"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$SRC_DIR/sql/ry_20250522.sql"
+          fi
+          REMOTE
+
       - name: Restart service
         shell: bash
         run: |
@@ -93,6 +132,30 @@ jobs:
             exit 1
           fi
 
+          get_mysql_root_password() {
+            python3 - <<'PY'
+          import os, re, subprocess, sys
+          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
+          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
+          if not os.path.exists(log):
+              sys.exit(1)
+          text = open(log, errors="ignore").read()
+          for match in re.finditer(pattern, text):
+              password = match.group(1).strip()
+              if not (3 <= len(password) <= 80):
+                  continue
+              env = os.environ.copy()
+              env["MYSQL_PWD"] = password
+              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if result.returncode == 0:
+                  print(password)
+                  sys.exit(0)
+          sys.exit(1)
+          PY
+          }
+
+          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password)"
+
           PID="$(pgrep -f "$APP_DIR/$APP_NAME" || true)"
           if [ -n "$PID" ]; then
             kill -TERM $PID
@@ -110,7 +173,7 @@ jobs:
           fi
 
           cd "$APP_DIR"
-          nohup "$JAVA_HOME/bin/java" \
+          SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD" nohup "$JAVA_HOME/bin/java" \
             -Dname="$APP_NAME" \
             -Duser.timezone=Asia/Shanghai \
             -Xms512m \
