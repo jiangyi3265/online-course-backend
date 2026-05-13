@@ -17,7 +17,7 @@ env:
   DEPLOY_PORT: "22"
   APP_DIR: /www/wwwroot/wangkejava
   APP_NAME: ruoyi-admin.jar
-  APP_PORT: "8080"
+  APP_PORT: "8007"
 
 jobs:
   deploy:
@@ -68,7 +68,7 @@ jobs:
 
           APP_DIR="/www/wwwroot/wangkejava"
           APP_NAME="ruoyi-admin.jar"
-          APP_PORT="8080"
+          APP_PORT="8007"
           LOG_FILE="$APP_DIR/logs/$APP_NAME.log"
 
           if ! command -v java >/dev/null 2>&1; then

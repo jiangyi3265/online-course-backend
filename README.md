@@ -33,7 +33,7 @@ mvn clean package -DskipTests
 java -jar ruoyi-admin/target/ruoyi-admin.jar
 ```
 
-默认后端端口为 `8080`。如需调整端口或数据库连接，请修改 `ruoyi-admin/src/main/resources/application.yml` 和 `application-druid.yml`。
+默认后端端口为 `8007`。如需调整端口或数据库连接，请修改 `ruoyi-admin/src/main/resources/application.yml` 和 `application-druid.yml`。
 
 ## 简历描述示例
 
