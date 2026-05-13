@@ -54,15 +54,17 @@ jobs:
         run: |
           set -euo pipefail
           test -f "ruoyi-admin/target/$APP_NAME"
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          SCP_OPTS="-i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          tar -C ruoyi-admin/target -czf - "$APP_NAME" | ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf - -C '$APP_DIR'"
+          scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/$APP_NAME.tmp"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
 
       - name: Restart service
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
 
@@ -100,6 +102,7 @@ jobs:
             -Xmx1024m \
             -jar "$APP_DIR/$APP_NAME" \
             --ruoyi.profile="$APP_DIR/uploadPath" \
+            --server.port="$APP_PORT" \
             > "$LOG_FILE" 2>&1 &
 
           for i in $(seq 1 40); do
