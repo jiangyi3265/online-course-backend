@@ -1,0 +1,123 @@
+name: Deploy Java Service
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-java-service
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: 101.42.94.41
+  DEPLOY_USER: root
+  DEPLOY_PORT: "22"
+  APP_DIR: /www/wwwroot/wangkejava
+  APP_NAME: ruoyi-admin.jar
+  APP_PORT: "8080"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
+          cache: maven
+
+      - name: Build jar
+        run: mvn -B -pl ruoyi-admin -am package -DskipTests
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          cat > ~/.ssh/deploy_key <<'SSH_KEY'
+          ${{ secrets.SERVER_SSH_KEY }}
+          SSH_KEY
+          grep -q "PRIVATE KEY" ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "ruoyi-admin/target/$APP_NAME"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          tar -C ruoyi-admin/target -czf - "$APP_NAME" | ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf - -C '$APP_DIR'"
+
+      - name: Restart service
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          APP_DIR="/www/wwwroot/wangkejava"
+          APP_NAME="ruoyi-admin.jar"
+          APP_PORT="8080"
+          LOG_FILE="$APP_DIR/logs/$APP_NAME.log"
+
+          if ! command -v java >/dev/null 2>&1; then
+            echo "java command not found on server"
+            exit 1
+          fi
+
+          PID="$(pgrep -f "$APP_DIR/$APP_NAME" || true)"
+          if [ -n "$PID" ]; then
+            kill -TERM $PID
+            for i in $(seq 1 30); do
+              if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          if pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+            echo "old java process is still running"
+            exit 1
+          fi
+
+          cd "$APP_DIR"
+          nohup java \
+            -Dname="$APP_NAME" \
+            -Duser.timezone=Asia/Shanghai \
+            -Xms512m \
+            -Xmx1024m \
+            -jar "$APP_DIR/$APP_NAME" \
+            --ruoyi.profile="$APP_DIR/uploadPath" \
+            > "$LOG_FILE" 2>&1 &
+
+          for i in $(seq 1 40); do
+            if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+              echo "java process exited"
+              tail -n 120 "$LOG_FILE" || true
+              exit 1
+            fi
+
+            HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP_PORT/" || true)"
+            if [ "$HTTP_CODE" != "000" ]; then
+              echo "service started with http code $HTTP_CODE"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "service did not respond on port $APP_PORT"
+          tail -n 120 "$LOG_FILE" || true
+          exit 1
+          REMOTE
