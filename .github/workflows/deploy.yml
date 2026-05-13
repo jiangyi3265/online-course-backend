@@ -18,6 +18,7 @@ env:
   APP_DIR: /www/wwwroot/wangkejava
   APP_NAME: ruoyi-admin.jar
   APP_PORT: "8007"
+  SERVER_JAVA_HOME: /usr/lib/jvm/java-8-konajdk-8.0.25-1.oc9
 
 jobs:
   deploy:
@@ -26,16 +27,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 8
-          cache: maven
-
-      - name: Build jar
-        run: mvn -B -pl ruoyi-admin -am package -DskipTests
 
       - name: Prepare SSH
         shell: bash
@@ -49,16 +40,39 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
-      - name: Upload jar
+      - name: Upload source
         shell: bash
         run: |
           set -euo pipefail
-          test -f "ruoyi-admin/target/$APP_NAME"
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          timeout 90s scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/$APP_NAME.tmp"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+          SRC_DIR="$APP_DIR/releases/$GITHUB_SHA"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$SRC_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          git archive --format=tar.gz HEAD | timeout 120s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf - -C '$SRC_DIR'"
+          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+
+      - name: Build jar on server
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' SRC_DIR='$SRC_DIR' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
+          set -euo pipefail
+          export PATH="$JAVA_HOME/bin:$PATH"
+
+          if [ ! -x "$JAVA_HOME/bin/javac" ]; then
+            echo "Java 8 JDK not found at $JAVA_HOME"
+            exit 1
+          fi
+          if ! command -v mvn >/dev/null 2>&1; then
+            echo "mvn command not found on server"
+            exit 1
+          fi
+
+          cd "$SRC_DIR"
+          mvn -B -pl ruoyi-admin -am package -DskipTests
+          cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
+          mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
+          REMOTE
 
       - name: Restart service
         shell: bash
@@ -71,10 +85,11 @@ jobs:
           APP_DIR="/www/wwwroot/wangkejava"
           APP_NAME="ruoyi-admin.jar"
           APP_PORT="8007"
+          JAVA_HOME="/usr/lib/jvm/java-8-konajdk-8.0.25-1.oc9"
           LOG_FILE="$APP_DIR/logs/$APP_NAME.log"
 
-          if ! command -v java >/dev/null 2>&1; then
-            echo "java command not found on server"
+          if [ ! -x "$JAVA_HOME/bin/java" ]; then
+            echo "Java runtime not found at $JAVA_HOME"
             exit 1
           fi
 
@@ -95,7 +110,7 @@ jobs:
           fi
 
           cd "$APP_DIR"
-          nohup java \
+          nohup "$JAVA_HOME/bin/java" \
             -Dname="$APP_NAME" \
             -Duser.timezone=Asia/Shanghai \
             -Xms512m \
