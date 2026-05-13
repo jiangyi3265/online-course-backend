@@ -18,7 +18,7 @@ env:
   APP_DIR: /www/wwwroot/wangkejava
   APP_NAME: ruoyi-admin.jar
   APP_PORT: "8007"
-  SERVER_JAVA_HOME: /usr/lib/jvm/java-8-konajdk-8.0.25-1.oc9
+  SERVER_JAVA_HOME: /usr/lib/jvm/java-17-konajdk
 
 jobs:
   deploy:
@@ -60,7 +60,7 @@ jobs:
           export PATH="$JAVA_HOME/bin:$PATH"
 
           if [ ! -x "$JAVA_HOME/bin/javac" ]; then
-            echo "Java 8 JDK not found at $JAVA_HOME"
+            echo "JDK not found at $JAVA_HOME"
             exit 1
           fi
           if ! command -v mvn >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ jobs:
           APP_DIR="/www/wwwroot/wangkejava"
           APP_NAME="ruoyi-admin.jar"
           APP_PORT="8007"
-          JAVA_HOME="/usr/lib/jvm/java-8-konajdk-8.0.25-1.oc9"
+          JAVA_HOME="/usr/lib/jvm/java-17-konajdk"
           LOG_FILE="$APP_DIR/logs/$APP_NAME.log"
 
           if [ ! -x "$JAVA_HOME/bin/java" ]; then
