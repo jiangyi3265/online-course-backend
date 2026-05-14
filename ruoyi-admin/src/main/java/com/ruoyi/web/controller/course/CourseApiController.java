@@ -268,7 +268,7 @@ public class CourseApiController
             map("label", "本周建议", "value", avg >= 80 ? "保持节奏" : "优先补弱")
         );
         List<String> suggestions = wrongCount > 0
-            ? Arrays.asList("先复盘错题本，再进入知识巩固。", "每次练习后查看解析，记录易错概念。")
+            ? Arrays.asList("先复盘错题与测试，再进入知识巩固。", "每次练习后查看解析，记录易错概念。")
             : Collections.singletonList("当前错题较少，可以继续推进新章节。");
         Collections.reverse(userAttempts);
         return AjaxResult.success(map(
@@ -351,10 +351,20 @@ public class CourseApiController
         Map<String, Object> user = currentUser(request);
         String lessonId = str(body.get("lessonId"));
         int rating = intValue(body.get("rating"));
+        if (user == null)
+        {
+            return AjaxResult.error("请先登录后再评分");
+        }
+        Map<String, Object> progress = lessonProgress.get(progressKey(user, lessonId));
+        if (progress == null || intValue(progress.get("percent")) < 90)
+        {
+            return AjaxResult.error("学习进度达到90%后才可以评分");
+        }
         if (rating < 1 || rating > 5)
         {
             return AjaxResult.error("评分必须在 1 到 5 星之间");
         }
+        Map<String, Object> meta = resolveRatingMeta(lessonId, body);
         Map<String, Object> existing = null;
         for (Map<String, Object> item : lessonRatings)
         {
@@ -371,8 +381,13 @@ public class CourseApiController
         }
         existing.put("lessonId", lessonId);
         existing.put("lessonTitle", body.get("lessonTitle") == null ? lessonId : body.get("lessonTitle"));
+        existing.put("courseId", meta.get("courseId"));
+        existing.put("courseTitle", meta.get("courseTitle"));
+        existing.put("subjectTitle", meta.get("subjectTitle"));
+        existing.put("chapterTitle", meta.get("chapterTitle"));
         existing.put("rating", rating);
         existing.put("userId", user == null ? null : user.get("id"));
+        existing.put("userName", user == null ? "" : user.get("name"));
         existing.put("updatedAt", now());
         persistData();
         return AjaxResult.success(map("lessonId", lessonId, "rating", rating));
@@ -509,19 +524,31 @@ public class CourseApiController
     @PostMapping("/app/orders")
     public AjaxResult createOrder(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
-        return AjaxResult.error("课程开通请使用卡密验证");
+        return AjaxResult.error("课程开通请使用激活码验证");
     }
 
     @PostMapping("/app/activate")
     public AjaxResult activate(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
         String code = normalizeCardCode(body.get("code"));
+        String studentName = str(body.get("studentName")).trim();
+        String grade = str(body.get("grade")).trim();
+        String schoolName = str(body.get("schoolName")).trim();
+        String region = str(body.get("region")).trim();
+        if (code.length() == 0 || studentName.length() == 0 || grade.length() == 0 || schoolName.length() == 0 || region.length() == 0)
+        {
+            return AjaxResult.error("请填写激活码、学生名字、年级、学校名字和所在地区");
+        }
         String courseId = cardCourseId(code);
         if (courseId.length() == 0)
         {
             return AjaxResult.error("激活码无效");
         }
-        Map<String, Object> order = createOrderRecord(courseId, currentUser(request), "卡密激活", code);
+        Map<String, Object> order = createOrderRecord(courseId, currentUser(request), "激活码开通", code);
+        order.put("studentName", studentName);
+        order.put("grade", grade);
+        order.put("schoolName", schoolName);
+        order.put("region", region);
         persistData();
         return AjaxResult.success(order);
     }
@@ -904,7 +931,7 @@ public class CourseApiController
         studyPlans.add(map("courseId", "gk-math-full", "title", "高考数学阶段学案", "tasks", list(
             map("id", "plan-1", "title", "复习集合交集与补集", "type", "知识回顾", "done", true),
             map("id", "plan-2", "title", "完成导数基础 3 道巩固题", "type", "训练任务", "done", false),
-            map("id", "plan-3", "title", "整理错题本中数列题", "type", "错题复盘", "done", false)
+            map("id", "plan-3", "title", "整理错题与测试中的数列题", "type", "错题复盘", "done", false)
         )));
     }
 
@@ -983,7 +1010,7 @@ public class CourseApiController
             "cover", cover,
             "detailCover", cover,
             "openMode", "trial".equals(kind) ? "trial" : "card",
-            "openText", "trial".equals(kind) ? "试听免费" : "卡密开通",
+            "openText", "trial".equals(kind) ? "试听免费" : "激活课程",
             "studyCount", studyCount,
             "totalLessons", "trial".equals(kind) ? 3 : 105,
             "totalDuration", "trial".equals(kind) ? "01小时29分" : "20小时37分",
@@ -1195,14 +1222,26 @@ public class CourseApiController
     {
         return map(
             "sections", list(
-                map("title", "知识点巩固", "items", list(map("label", "刷题数", "value", "186道"), map("label", "正确", "value", "142道"), map("label", "正确率", "value", "76%"), map("label", "平均得分", "value", "78分"))),
-                map("title", "章节测评", "items", list(map("label", "测评次数", "value", "8次"), map("label", "平均得分", "value", "74分"))),
-                map("title", "复习情况统计", "items", list(map("label", "复习课程完成情况", "value", "68%"), map("label", "测评统计", "value", "完成6次，平均72分"))),
-                map("title", "思维技巧", "items", list(map("label", "课程完成度", "value", "70%"), map("label", "训练做题", "value", "96道"), map("label", "正确", "value", "73道"), map("label", "平均得分", "value", "76分"))),
+                map("title", "知识点扫雷", "items", list(map("label", "刷题数", "value", "186道"), map("label", "正确", "value", "142道"), map("label", "正确率", "value", "76%"), map("label", "平均得分", "value", "78分"))),
+                map("title", "章节测评", "items", list(map("label", "测评次数", "value", "18次"), map("label", "平均得分", "value", "77分")), "details", list(
+                    map("title", "集合", "count", "测试次数8次", "score", "平均74分", "records", list(
+                        map("name", "入门测", "result", "正确14题，错误6题", "score", "72分"),
+                        map("name", "章节测试", "result", "正确16题，错误4题", "score", "76分")
+                    )),
+                    map("title", "数列", "count", "测试次数10次", "score", "平均80分", "records", list(
+                        map("name", "通项公式", "result", "正确17题，错误3题", "score", "82分"),
+                        map("name", "求和训练", "result", "正确15题，错误5题", "score", "78分")
+                    ))
+                )),
+                map("title", "复习情况统计", "items", list(map("label", "复习课程完成情况", "value", "68%"), map("label", "测评统计", "value", "完成6次，平均72分")), "details", list(
+                    map("title", "第1次复习试卷", "count", "完成", "score", "70分", "records", list(map("name", "错题复盘", "result", "正确12题，错误5题", "score", "70分"))),
+                    map("title", "第2次复习试卷", "count", "完成", "score", "74分", "records", list(map("name", "综合测试", "result", "正确15题，错误4题", "score", "74分")))
+                )),
+                map("title", "思维技巧", "items", list(map("label", "英语完成度", "value", "30%"), map("label", "训练做题", "value", "96道"), map("label", "正确", "value", "73道"), map("label", "错误", "value", "23道"), map("label", "平均得分", "value", "76分"))),
                 map("title", "英语外语科目", "items", list(map("label", "单词完成数量", "value", "428个"), map("label", "今日完成", "value", "36个")))
             ),
             "plateScores", list(
-                plate("知识点巩固", 78),
+                plate("知识点扫雷", 78),
                 plate("章节测评", 74),
                 plate("复习情况", 62),
                 plate("思维技巧", 86),
@@ -1219,6 +1258,12 @@ public class CourseApiController
             totalCounts.put(i, 0);
         }
         int[][] base = new int[][]{{8, 5, 3, 1, 1}, {4, 8, 9, 4, 1}, {2, 4, 12, 10, 4}, {1, 2, 8, 16, 14}};
+        List<Map<String, Object>> groups = list(
+            map("range", "30以内", "students", 18, "counts", countsMap(base[0])),
+            map("range", "30-50", "students", 26, "counts", countsMap(base[1])),
+            map("range", "50-70", "students", 32, "counts", countsMap(base[2])),
+            map("range", "70+", "students", 41, "counts", countsMap(base[3]))
+        );
         for (int[] group : base)
         {
             for (int i = 0; i < group.length; i++)
@@ -1238,17 +1283,139 @@ public class CourseApiController
             count += entry.getValue();
             weighted += entry.getKey() * entry.getValue();
         }
-        return map("average", count == 0 ? "0.0" : String.format("%.1f", weighted / (float) count), "chapterTotal", count, "totalCounts", totalCounts, "groups", list(
-            map("range", "30以内", "students", 18),
-            map("range", "30-50", "students", 26),
-            map("range", "50-70", "students", 32),
-            map("range", "70+", "students", 41)
-        ));
+        return map(
+            "average", count == 0 ? "0.0" : String.format("%.1f", weighted / (float) count),
+            "chapterTotal", count,
+            "totalCounts", totalCounts,
+            "groups", groups,
+            "subjects", ratingBreakdown("subjectTitle"),
+            "chapters", ratingBreakdown("chapterTitle"),
+            "lessons", ratingBreakdown("lessonTitle")
+        );
+    }
+
+    private static Map<Integer, Integer> countsMap(int[] values)
+    {
+        Map<Integer, Integer> counts = new LinkedHashMap<>();
+        for (int i = 1; i <= 5; i++)
+        {
+            counts.put(i, i <= values.length ? values[i - 1] : 0);
+        }
+        return counts;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> ratingBreakdown(String field)
+    {
+        Map<String, Map<String, Object>> buckets = new LinkedHashMap<>();
+        for (Map<String, Object> item : lessonRatings)
+        {
+            String name = str(item.get(field));
+            if (name.length() == 0)
+            {
+                name = "未归类";
+            }
+            Map<String, Object> bucket = buckets.get(name);
+            if (bucket == null)
+            {
+                bucket = map("name", name, "total", 0, "average", "0.0", "counts", countsMap(new int[]{0, 0, 0, 0, 0}));
+                buckets.put(name, bucket);
+            }
+            int rating = intValue(item.get("rating"));
+            if (rating < 1 || rating > 5)
+            {
+                continue;
+            }
+            Map<Integer, Integer> counts = (Map<Integer, Integer>) bucket.get("counts");
+            counts.put(rating, counts.get(rating) + 1);
+            int total = intValue(bucket.get("total")) + 1;
+            int weighted = intValue(bucket.get("weighted")) + rating;
+            bucket.put("total", total);
+            bucket.put("weighted", weighted);
+            bucket.put("average", String.format("%.1f", weighted / (float) total));
+        }
+        List<Map<String, Object>> result = new ArrayList<>(buckets.values());
+        for (Map<String, Object> item : result)
+        {
+            item.remove("weighted");
+        }
+        return result;
     }
 
     private static Map<String, Object> createOrderRecord(String courseId, Map<String, Object> user, String source)
     {
         return createOrderRecord(courseId, user, source, "");
+    }
+
+    private static Map<String, Object> resolveRatingMeta(String lessonId, Map<String, Object> body)
+    {
+        String courseId = str(body.get("courseId"));
+        String chapterTitle = str(body.get("chapterTitle"));
+        Map<String, Object> course = findCourse(courseId);
+        Map<String, Object> found = course == null || chapterTitle.length() == 0 ? findLessonMeta(lessonId, courseId) : null;
+        if (found != null)
+        {
+            if (course == null)
+            {
+                course = mapValue(found.get("course"));
+            }
+            if (courseId.length() == 0)
+            {
+                courseId = str(found.get("courseId"));
+            }
+            if (chapterTitle.length() == 0)
+            {
+                chapterTitle = str(found.get("chapterTitle"));
+            }
+        }
+        return map(
+            "courseId", courseId,
+            "courseTitle", course == null ? str(body.get("courseTitle")) : str(course.get("courseName")),
+            "subjectTitle", course == null ? str(body.get("courseTitle")) : str(course.get("title")),
+            "chapterTitle", chapterTitle.length() == 0 ? "未归类章节" : chapterTitle
+        );
+    }
+
+    private static Map<String, Object> findLessonMeta(String lessonId, String preferredCourseId)
+    {
+        for (Map<String, Object> course : courses)
+        {
+            if (preferredCourseId.length() > 0 && !preferredCourseId.equals(course.get("id")))
+            {
+                continue;
+            }
+            Map<String, Object> found = findLessonMetaInCourse(lessonId, course);
+            if (found != null)
+            {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> findLessonMetaInCourse(String lessonId, Map<String, Object> course)
+    {
+        for (Map<String, Object> chapter : mapList(course.get("chapters")))
+        {
+            if (lessonId.equals(str(chapter.get("title"))))
+            {
+                return map("course", course, "courseId", course.get("id"), "chapterTitle", chapter.get("title"));
+            }
+        }
+        for (Map<String, Object> version : mapList(course.get("versions")))
+        {
+            for (Map<String, Object> chapter : mapList(version.get("chapters")))
+            {
+                for (Map<String, Object> lesson : mapList(chapter.get("items")))
+                {
+                    if (lessonId.equals(str(lesson.get("title"))))
+                    {
+                        return map("course", course, "courseId", course.get("id"), "chapterTitle", chapter.get("title"));
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private static Map<String, Object> createOrderRecord(String courseId, Map<String, Object> user, String source, String cardCode)
@@ -1427,7 +1594,7 @@ public class CourseApiController
         }
         if (!course.containsKey("openText"))
         {
-            course.put("openText", "trial".equals(course.get("kind")) ? "试听免费" : "卡密开通");
+            course.put("openText", "trial".equals(course.get("kind")) ? "试听免费" : "激活课程");
         }
         if (!course.containsKey("versions"))
         {
@@ -1451,6 +1618,23 @@ public class CourseApiController
             return (Map<String, Object>) value;
         }
         return new LinkedHashMap<>();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> mapList(Object value)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (value instanceof List)
+        {
+            for (Object item : (List<Object>) value)
+            {
+                if (item instanceof Map)
+                {
+                    result.add((Map<String, Object>) item);
+                }
+            }
+        }
+        return result;
     }
 
     @SuppressWarnings("unchecked")
