@@ -41,18 +41,14 @@ jobs:
           SSH_KEY
           grep -q "PRIVATE KEY" ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          for i in {1..10}; do
-            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts && break
-            sleep 3
-          done
-          test -s ~/.ssh/known_hosts
+          : > ~/.ssh/known_hosts
 
       - name: Upload source archive
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
           SOURCE_ARCHIVE="wangkejava-source.tar.gz"
 
@@ -67,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
 
@@ -102,7 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' bash -s" <<'REMOTE'
           set -euo pipefail
 
@@ -146,7 +142,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' LEGACY_APP_NAME='$LEGACY_APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
 
