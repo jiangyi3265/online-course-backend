@@ -41,7 +41,11 @@ jobs:
           SSH_KEY
           grep -q "PRIVATE KEY" ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          for i in {1..10}; do
+            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts && break
+            sleep 3
+          done
+          test -s ~/.ssh/known_hosts
 
       - name: Upload source archive
         shell: bash
@@ -76,7 +80,19 @@ jobs:
           fi
 
           cd "$SOURCE_DIR"
-          mvn -B -pl ruoyi-admin -am package -DskipTests
+          BUILD_LOG="$RELEASE_DIR/build.log"
+          mvn -B -pl ruoyi-admin -am package -DskipTests > "$BUILD_LOG" 2>&1 &
+          BUILD_PID="$!"
+          while kill -0 "$BUILD_PID" >/dev/null 2>&1; do
+            tail -n 20 "$BUILD_LOG" || true
+            sleep 20
+          done
+          set +e
+          wait "$BUILD_PID"
+          BUILD_STATUS="$?"
+          set -e
+          tail -n 80 "$BUILD_LOG" || true
+          [ "$BUILD_STATUS" = "0" ]
           test -f "ruoyi-admin/target/$APP_NAME"
           cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
           mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
