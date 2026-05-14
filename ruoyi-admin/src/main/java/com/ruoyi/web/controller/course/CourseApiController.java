@@ -71,6 +71,49 @@ public class CourseApiController
         return AjaxResult.error("账号或密码错误");
     }
 
+    @PostMapping("/app/register")
+    public AjaxResult register(@RequestBody Map<String, Object> body)
+    {
+        String phone = str(body.get("phone")).trim();
+        String password = str(body.get("password"));
+        String name = str(body.get("name")).trim();
+        if (!phone.matches("^1\\d{10}$"))
+        {
+            return AjaxResult.error("请输入正确的手机号");
+        }
+        if (password.length() < 6 || password.length() > 32)
+        {
+            return AjaxResult.error("密码长度需为 6 到 32 位");
+        }
+        synchronized (users)
+        {
+            for (Map<String, Object> user : users)
+            {
+                if (phone.equals(user.get("phone")))
+                {
+                    return AjaxResult.error("手机号已注册，请直接登录");
+                }
+            }
+            if (name.length() == 0)
+            {
+                name = "同学" + phone.substring(7);
+            }
+            Map<String, Object> user = map(
+                "phone", phone,
+                "password", password,
+                "name", name,
+                "id", "u" + System.currentTimeMillis(),
+                "tenantId", 52,
+                "role", "student",
+                "status", "active",
+                "createdAt", now()
+            );
+            users.add(user);
+            Map<String, Object> data = map("token", "local-" + user.get("id"), "user", publicUser(user));
+            return AjaxResult.success(data);
+        }
+    }
+
     @GetMapping("/app/courses")
     public AjaxResult appCourses(@RequestParam Map<String, String> params)
     {
