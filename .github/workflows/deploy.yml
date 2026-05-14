@@ -1,4 +1,4 @@
-name: Deploy Java Service
+name: Deploy Wangke Java Service
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-java-service
+  group: deploy-wangkejava-service
   cancel-in-progress: true
 
 env:
@@ -16,17 +16,30 @@ env:
   DEPLOY_USER: root
   DEPLOY_PORT: "22"
   APP_DIR: /www/wwwroot/wangkejava
-  APP_NAME: ruoyi-admin.jar
+  APP_NAME: wangkejava.jar
+  LEGACY_APP_NAME: ruoyi-admin.jar
   APP_PORT: "8007"
   SERVER_JAVA_HOME: /usr/lib/jvm/java-17-konajdk
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+
+      - name: Build jar
+        run: mvn -B -pl ruoyi-admin -am package -DskipTests
 
       - name: Prepare SSH
         shell: bash
@@ -40,46 +53,29 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
-      - name: Upload source
+      - name: Upload release files
         shell: bash
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          SRC_DIR="$APP_DIR/releases/$GITHUB_SHA"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$SRC_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          git archive --format=tar.gz HEAD | timeout 120s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf - -C '$SRC_DIR'"
-          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+          SCP_OPTS="-i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
 
-      - name: Build jar on server
-        shell: bash
-        run: |
-          set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' SRC_DIR='$SRC_DIR' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
-          set -euo pipefail
-          export PATH="$JAVA_HOME/bin:$PATH"
-
-          if [ ! -x "$JAVA_HOME/bin/javac" ]; then
-            echo "JDK not found at $JAVA_HOME"
-            exit 1
+          test -f "ruoyi-admin/target/$APP_NAME"
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+          if [ -f sql/ry_20250522.sql ]; then
+            scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
-          if ! command -v mvn >/dev/null 2>&1; then
-            echo "mvn command not found on server"
-            exit 1
-          fi
-
-          cd "$SRC_DIR"
-          mvn -B -pl ruoyi-admin -am package -DskipTests
-          cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
-          mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
-          REMOTE
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
 
       - name: Ensure database
         shell: bash
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "SRC_DIR='$SRC_DIR' bash -s" <<'REMOTE'
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' bash -s" <<'REMOTE'
           set -euo pipefail
 
           get_mysql_root_password() {
@@ -104,12 +100,17 @@ jobs:
           PY
           }
 
-          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password)"
+          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+            echo "mysql root password not detected, skip database bootstrap"
+            exit 0
+          fi
+
           DB_EXISTS="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "show databases like 'ha'" || true)"
           if [ "$DB_EXISTS" != "ha" ]; then
-            test -f "$SRC_DIR/sql/ry_20250522.sql"
+            test -f "$RELEASE_DIR/ry_20250522.sql"
             MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "create database ha default character set utf8mb4 collate utf8mb4_general_ci"
-            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$SRC_DIR/sql/ry_20250522.sql"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$RELEASE_DIR/ry_20250522.sql"
           fi
           REMOTE
 
@@ -118,17 +119,17 @@ jobs:
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' LEGACY_APP_NAME='$LEGACY_APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
 
-          APP_DIR="/www/wwwroot/wangkejava"
-          APP_NAME="ruoyi-admin.jar"
-          APP_PORT="8007"
-          JAVA_HOME="/usr/lib/jvm/java-17-konajdk"
-          LOG_FILE="$APP_DIR/logs/$APP_NAME.log"
-
-          if [ ! -x "$JAVA_HOME/bin/java" ]; then
-            echo "Java runtime not found at $JAVA_HOME"
+          LOG_FILE="$APP_DIR/logs/${APP_NAME%.jar}.log"
+          JAVA_BIN=""
+          if [ -x "$JAVA_HOME/bin/java" ]; then
+            JAVA_BIN="$JAVA_HOME/bin/java"
+          elif command -v java >/dev/null 2>&1; then
+            JAVA_BIN="$(command -v java)"
+          else
+            echo "java runtime not found"
             exit 1
           fi
 
@@ -154,26 +155,39 @@ jobs:
           PY
           }
 
-          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password)"
+          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
 
-          PID="$(pgrep -f "$APP_DIR/$APP_NAME" || true)"
-          if [ -n "$PID" ]; then
-            kill -TERM $PID
-            for i in $(seq 1 30); do
-              if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
-                break
+          for app in "$APP_NAME" "$LEGACY_APP_NAME"; do
+            [ -n "$app" ] || continue
+            PID="$(pgrep -f "$APP_DIR/$app" || true)"
+            if [ -n "$PID" ]; then
+              kill -TERM $PID || true
+            fi
+          done
+
+          for i in $(seq 1 30); do
+            RUNNING=""
+            for app in "$APP_NAME" "$LEGACY_APP_NAME"; do
+              [ -n "$app" ] || continue
+              if pgrep -f "$APP_DIR/$app" >/dev/null 2>&1; then
+                RUNNING=1
               fi
-              sleep 1
             done
-          fi
+            [ -z "$RUNNING" ] && break
+            sleep 1
+          done
 
-          if pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+          if pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1 || pgrep -f "$APP_DIR/$LEGACY_APP_NAME" >/dev/null 2>&1; then
             echo "old java process is still running"
             exit 1
           fi
 
           cd "$APP_DIR"
-          SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD" nohup "$JAVA_HOME/bin/java" \
+          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+          fi
+
+          nohup "$JAVA_BIN" \
             -Dname="$APP_NAME" \
             -Duser.timezone=Asia/Shanghai \
             -Xms512m \

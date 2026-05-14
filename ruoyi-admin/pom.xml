@@ -90,7 +90,7 @@
                 </configuration>   
            </plugin>   
         </plugins>
-        <finalName>${project.artifactId}</finalName>
+        <finalName>wangkejava</finalName>
     </build>
 
 </project>
