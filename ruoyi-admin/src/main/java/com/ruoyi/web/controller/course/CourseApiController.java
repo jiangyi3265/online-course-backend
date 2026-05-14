@@ -1,5 +1,7 @@
 package com.ruoyi.web.controller.course;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -8,7 +10,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -18,19 +22,24 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ruoyi.common.core.domain.AjaxResult;
 
 /**
  * 网课三端联调用接口。
  *
- * 这一版先使用进程内数据，便于直接跑通 uni-app、Vue 管理端、RuoYi 后端。
+ * 轻量 JSON 持久化，便于直接跑通 uni-app、Vue 管理端、RuoYi 后端。
  */
 @RestController
 @RequestMapping("/course")
 public class CourseApiController
 {
     private static final String SAMPLE_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
+    private static final String DATA_FILE_NAME = "course-data.json";
 
+    private static final ObjectMapper objectMapper = new ObjectMapper();
+    private static final Object storeLock = new Object();
     private static final List<Map<String, Object>> users = new ArrayList<>();
     private static final List<Map<String, Object>> courses = new ArrayList<>();
     private static final List<Map<String, Object>> enrollments = new ArrayList<>();
@@ -46,6 +55,9 @@ public class CourseApiController
     private static final List<Map<String, Object>> aiChats = new ArrayList<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
 
+    @Value("${ruoyi.profile:}")
+    private String profilePath;
+
     static
     {
         initUsers();
@@ -53,6 +65,41 @@ public class CourseApiController
         initDocs();
         initQuestions();
         initStudyData();
+    }
+
+    @PostConstruct
+    public void loadPersistedData()
+    {
+        File file = dataFile();
+        if (!file.exists())
+        {
+            return;
+        }
+        synchronized (storeLock)
+        {
+            try
+            {
+                Map<String, Object> data = objectMapper.readValue(file, new TypeReference<Map<String, Object>>() {});
+                restoreList(data, "users", users);
+                restoreList(data, "courses", courses);
+                restoreList(data, "enrollments", enrollments);
+                restoreList(data, "docs", docs);
+                restoreList(data, "questions", questions);
+                restoreList(data, "reinforcePoints", reinforcePoints);
+                restoreList(data, "studyPlans", studyPlans);
+                restoreList(data, "orders", orders);
+                restoreList(data, "authRequests", authRequests);
+                restoreList(data, "attempts", attempts);
+                restoreList(data, "wrongQuestions", wrongQuestions);
+                restoreList(data, "lessonRatings", lessonRatings);
+                restoreList(data, "aiChats", aiChats);
+                restoreProgress(data);
+            }
+            catch (IOException e)
+            {
+                throw new IllegalStateException("读取课程数据失败", e);
+            }
+        }
     }
 
     @PostMapping("/app/login")
@@ -109,6 +156,7 @@ public class CourseApiController
                 "createdAt", now()
             );
             users.add(user);
+            persistData();
             Map<String, Object> data = map("token", "local-" + user.get("id"), "user", publicUser(user));
             return AjaxResult.success(data);
         }
@@ -286,6 +334,7 @@ public class CourseApiController
             "updatedAt", now()
         );
         lessonProgress.put(progressKey(user, lessonId), progress);
+        persistData();
         return AjaxResult.success(progress);
     }
 
@@ -325,6 +374,7 @@ public class CourseApiController
         existing.put("rating", rating);
         existing.put("userId", user == null ? null : user.get("id"));
         existing.put("updatedAt", now());
+        persistData();
         return AjaxResult.success(map("lessonId", lessonId, "rating", rating));
     }
 
@@ -337,7 +387,9 @@ public class CourseApiController
     @PostMapping("/app/practice/submit")
     public AjaxResult submitPractice(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
-        return AjaxResult.success(grade(body, currentUser(request)));
+        Map<String, Object> result = grade(body, currentUser(request));
+        persistData();
+        return AjaxResult.success(result);
     }
 
     @GetMapping("/app/quiz")
@@ -350,7 +402,9 @@ public class CourseApiController
     public AjaxResult submitQuiz(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
         body.put("type", "quiz");
-        return AjaxResult.success(grade(body, currentUser(request)));
+        Map<String, Object> result = grade(body, currentUser(request));
+        persistData();
+        return AjaxResult.success(result);
     }
 
     @GetMapping("/app/wrongbook")
@@ -372,6 +426,7 @@ public class CourseApiController
             {
                 wrong.put("mastered", true);
                 wrong.put("updatedAt", now());
+                persistData();
                 return AjaxResult.success(wrong);
             }
         }
@@ -429,6 +484,7 @@ public class CourseApiController
             "createdAt", now()
         );
         aiChats.add(chat);
+        persistData();
         return AjaxResult.success(chat);
     }
 
@@ -446,6 +502,7 @@ public class CourseApiController
             "createdAt", now()
         );
         authRequests.add(item);
+        persistData();
         return AjaxResult.success(item);
     }
 
@@ -464,7 +521,9 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码无效");
         }
-        return AjaxResult.success(createOrderRecord(courseId, currentUser(request), "卡密激活", code));
+        Map<String, Object> order = createOrderRecord(courseId, currentUser(request), "卡密激活", code);
+        persistData();
+        return AjaxResult.success(order);
     }
 
     @GetMapping("/admin/dashboard")
@@ -498,6 +557,7 @@ public class CourseApiController
         }
         ensureCourseDefaults(course);
         courses.add(course);
+        persistData();
         return AjaxResult.success(course);
     }
 
@@ -512,6 +572,7 @@ public class CourseApiController
         course.putAll(body);
         course.put("id", id);
         ensureCourseDefaults(course);
+        persistData();
         return AjaxResult.success(course);
     }
 
@@ -519,6 +580,7 @@ public class CourseApiController
     public AjaxResult deleteCourse(@PathVariable String id)
     {
         courses.removeIf(item -> id.equals(item.get("id")));
+        persistData();
         return AjaxResult.success();
     }
 
@@ -536,6 +598,7 @@ public class CourseApiController
             doc.put("id", "doc-" + System.currentTimeMillis());
         }
         docs.add(doc);
+        persistData();
         return AjaxResult.success(doc);
     }
 
@@ -549,6 +612,7 @@ public class CourseApiController
         }
         doc.putAll(body);
         doc.put("id", id);
+        persistData();
         return AjaxResult.success(doc);
     }
 
@@ -556,6 +620,7 @@ public class CourseApiController
     public AjaxResult deleteDoc(@PathVariable String id)
     {
         docs.removeIf(item -> id.equals(item.get("id")));
+        persistData();
         return AjaxResult.success();
     }
 
@@ -573,6 +638,7 @@ public class CourseApiController
             question.put("id", "q-" + System.currentTimeMillis());
         }
         questions.add(question);
+        persistData();
         return AjaxResult.success(question);
     }
 
@@ -586,6 +652,7 @@ public class CourseApiController
         }
         question.putAll(body);
         question.put("id", id);
+        persistData();
         return AjaxResult.success(question);
     }
 
@@ -593,6 +660,7 @@ public class CourseApiController
     public AjaxResult deleteQuestion(@PathVariable String id)
     {
         questions.removeIf(item -> id.equals(item.get("id")));
+        persistData();
         return AjaxResult.success();
     }
 
@@ -635,6 +703,7 @@ public class CourseApiController
                 "source", "后台授权"
             ));
         }
+        persistData();
         return AjaxResult.success(request);
     }
 
@@ -648,7 +717,9 @@ public class CourseApiController
     public AjaxResult adminCreateOrder(@RequestBody Map<String, Object> body)
     {
         Map<String, Object> user = findById(users, str(body.get("userId")));
-        return AjaxResult.success(createOrderRecord(str(body.get("courseId")), user, "后台开课", str(body.get("cardCode"))));
+        Map<String, Object> order = createOrderRecord(str(body.get("courseId")), user, "后台开课", str(body.get("cardCode")));
+        persistData();
+        return AjaxResult.success(order);
     }
 
     @GetMapping("/admin/study")
@@ -663,6 +734,113 @@ public class CourseApiController
             "reinforcePoints", reinforcePoints,
             "studyPlans", studyPlans
         ));
+    }
+
+    private File dataFile()
+    {
+        String basePath = str(profilePath).trim();
+        if (basePath.length() == 0)
+        {
+            basePath = System.getProperty("user.dir");
+        }
+        return new File(basePath, DATA_FILE_NAME);
+    }
+
+    private void persistData()
+    {
+        synchronized (storeLock)
+        {
+            try
+            {
+                File file = dataFile();
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists())
+                {
+                    parent.mkdirs();
+                }
+                objectMapper.writerWithDefaultPrettyPrinter().writeValue(file, snapshotData());
+            }
+            catch (IOException e)
+            {
+                throw new IllegalStateException("保存课程数据失败", e);
+            }
+        }
+    }
+
+    private static Map<String, Object> snapshotData()
+    {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("users", copyList(users));
+        data.put("courses", copyList(courses));
+        data.put("enrollments", copyList(enrollments));
+        data.put("docs", copyList(docs));
+        data.put("questions", copyList(questions));
+        data.put("reinforcePoints", copyList(reinforcePoints));
+        data.put("studyPlans", copyList(studyPlans));
+        data.put("orders", copyList(orders));
+        data.put("authRequests", copyList(authRequests));
+        data.put("attempts", copyList(attempts));
+        data.put("wrongQuestions", copyList(wrongQuestions));
+        data.put("lessonRatings", copyList(lessonRatings));
+        data.put("aiChats", copyList(aiChats));
+        data.put("lessonProgress", copyProgress());
+        return data;
+    }
+
+    private static List<Map<String, Object>> copyList(List<Map<String, Object>> source)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> item : source)
+        {
+            result.add(new LinkedHashMap<>(item));
+        }
+        return result;
+    }
+
+    private static Map<String, Map<String, Object>> copyProgress()
+    {
+        Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Object>> entry : lessonProgress.entrySet())
+        {
+            result.put(entry.getKey(), new LinkedHashMap<>(entry.getValue()));
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void restoreList(Map<String, Object> data, String key, List<Map<String, Object>> target)
+    {
+        Object value = data.get(key);
+        if (!(value instanceof List))
+        {
+            return;
+        }
+        target.clear();
+        for (Object item : (List<?>) value)
+        {
+            if (item instanceof Map)
+            {
+                target.add(new LinkedHashMap<>((Map<String, Object>) item));
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void restoreProgress(Map<String, Object> data)
+    {
+        Object value = data.get("lessonProgress");
+        if (!(value instanceof Map))
+        {
+            return;
+        }
+        lessonProgress.clear();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet())
+        {
+            if (entry.getKey() != null && entry.getValue() instanceof Map)
+            {
+                lessonProgress.put(String.valueOf(entry.getKey()), new LinkedHashMap<>((Map<String, Object>) entry.getValue()));
+            }
+        }
     }
 
     private static void initUsers()
