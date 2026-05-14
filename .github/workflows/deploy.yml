@@ -57,15 +57,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
-          SCP_OPTS="-i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
 
           test -f "ruoyi-admin/target/$APP_NAME"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+          timeout 10m scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
           if [ -f sql/ry_20250522.sql ]; then
-            scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
+            timeout 3m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
