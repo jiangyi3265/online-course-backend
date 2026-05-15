@@ -6,9 +6,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
@@ -388,6 +390,7 @@ public class CourseApiController
         existing.put("rating", rating);
         existing.put("userId", user == null ? null : user.get("id"));
         existing.put("userName", user == null ? "" : user.get("name"));
+        existing.put("recentExamScore", recentExamScoreForUserCourse(user, str(meta.get("courseId"))));
         existing.put("updatedAt", now());
         persistData();
         return AjaxResult.success(map("lessonId", lessonId, "rating", rating));
@@ -1252,6 +1255,7 @@ public class CourseApiController
         );
     }
 
+    @SuppressWarnings("unchecked")
     private static Map<String, Object> ratingStats()
     {
         Map<Integer, Integer> totalCounts = new LinkedHashMap<>();
@@ -1259,25 +1263,49 @@ public class CourseApiController
         {
             totalCounts.put(i, 0);
         }
-        int[][] base = new int[][]{{8, 5, 3, 1, 1}, {4, 8, 9, 4, 1}, {2, 4, 12, 10, 4}, {1, 2, 8, 16, 14}};
-        List<Map<String, Object>> groups = list(
-            map("range", "30以内", "students", 18, "counts", countsMap(base[0])),
-            map("range", "30-50", "students", 26, "counts", countsMap(base[1])),
-            map("range", "50-70", "students", 32, "counts", countsMap(base[2])),
-            map("range", "70+", "students", 41, "counts", countsMap(base[3]))
-        );
-        for (int[] group : base)
+
+        List<Map<String, Object>> groups = scoreGroups();
+        Map<String, Map<String, Object>> groupByRange = new LinkedHashMap<>();
+        Map<String, Set<String>> groupStudents = new LinkedHashMap<>();
+        for (Map<String, Object> group : groups)
         {
-            for (int i = 0; i < group.length; i++)
-            {
-                totalCounts.put(i + 1, totalCounts.get(i + 1) + group[i]);
-            }
+            String range = str(group.get("range"));
+            groupByRange.put(range, group);
+            groupStudents.put(range, new LinkedHashSet<>());
         }
+
         for (Map<String, Object> item : lessonRatings)
         {
             int rating = intValue(item.get("rating"));
+            if (rating < 1 || rating > 5)
+            {
+                continue;
+            }
             totalCounts.put(rating, totalCounts.get(rating) + 1);
+
+            String range = scoreRange(recentExamScoreForRating(item));
+            Map<String, Object> group = groupByRange.get(range);
+            if (group == null)
+            {
+                group = map("range", range, "students", 0, "counts", countsMap(new int[]{0, 0, 0, 0, 0}));
+                groupByRange.put(range, group);
+                groupStudents.put(range, new LinkedHashSet<>());
+                groups.add(group);
+            }
+            Map<Integer, Integer> counts = (Map<Integer, Integer>) group.get("counts");
+            counts.put(rating, counts.get(rating) + 1);
+            String studentKey = str(item.get("userId"));
+            if (studentKey.length() == 0)
+            {
+                studentKey = "rating:" + str(item.get("id"));
+            }
+            groupStudents.get(range).add(studentKey);
         }
+        for (Map<String, Object> group : groups)
+        {
+            group.put("students", groupStudents.get(str(group.get("range"))).size());
+        }
+
         int count = 0;
         int weighted = 0;
         for (Map.Entry<Integer, Integer> entry : totalCounts.entrySet())
@@ -1290,9 +1318,20 @@ public class CourseApiController
             "chapterTotal", count,
             "totalCounts", totalCounts,
             "groups", groups,
+            "groupBasis", "activationRecentExamScore",
             "subjects", ratingBreakdown("subjectTitle"),
             "chapters", ratingBreakdown("chapterTitle"),
             "lessons", ratingBreakdown("lessonTitle")
+        );
+    }
+
+    private static List<Map<String, Object>> scoreGroups()
+    {
+        return list(
+            map("range", "30以内", "students", 0, "counts", countsMap(new int[]{0, 0, 0, 0, 0})),
+            map("range", "30-50", "students", 0, "counts", countsMap(new int[]{0, 0, 0, 0, 0})),
+            map("range", "50-70", "students", 0, "counts", countsMap(new int[]{0, 0, 0, 0, 0})),
+            map("range", "70+", "students", 0, "counts", countsMap(new int[]{0, 0, 0, 0, 0}))
         );
     }
 
@@ -1304,6 +1343,119 @@ public class CourseApiController
             counts.put(i, i <= values.length ? values[i - 1] : 0);
         }
         return counts;
+    }
+
+    private static String scoreRange(String scoreText)
+    {
+        double score = firstNumber(scoreText);
+        if (score < 0)
+        {
+            return "未填写分数";
+        }
+        if (score <= 30)
+        {
+            return "30以内";
+        }
+        if (score <= 50)
+        {
+            return "30-50";
+        }
+        if (score <= 70)
+        {
+            return "50-70";
+        }
+        return "70+";
+    }
+
+    private static double firstNumber(String text)
+    {
+        String value = str(text).trim();
+        StringBuilder number = new StringBuilder();
+        boolean started = false;
+        boolean dotUsed = false;
+        for (int i = 0; i < value.length(); i++)
+        {
+            char ch = value.charAt(i);
+            if (Character.isDigit(ch))
+            {
+                number.append(ch);
+                started = true;
+                continue;
+            }
+            if (ch == '.' && started && !dotUsed)
+            {
+                number.append(ch);
+                dotUsed = true;
+                continue;
+            }
+            if (started)
+            {
+                break;
+            }
+        }
+        if (number.length() == 0)
+        {
+            return -1;
+        }
+        try
+        {
+            return Double.parseDouble(number.toString());
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    private static String recentExamScoreForRating(Map<String, Object> rating)
+    {
+        String score = str(rating.get("recentExamScore")).trim();
+        if (score.length() > 0)
+        {
+            return score;
+        }
+        return recentExamScoreForUserCourse(str(rating.get("userId")), str(rating.get("courseId")));
+    }
+
+    private static String recentExamScoreForUserCourse(Map<String, Object> user, String courseId)
+    {
+        return recentExamScoreForUserCourse(user == null ? "" : str(user.get("id")), courseId);
+    }
+
+    private static String recentExamScoreForUserCourse(String userId, String courseId)
+    {
+        String score = recentExamScoreFromOrders(userId, courseId, true);
+        if (score.length() > 0)
+        {
+            return score;
+        }
+        return recentExamScoreFromOrders(userId, courseId, false);
+    }
+
+    private static String recentExamScoreFromOrders(String userId, String courseId, boolean requireCourse)
+    {
+        if (userId.length() == 0)
+        {
+            return "";
+        }
+        for (int i = orders.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> order = orders.get(i);
+            if (!userId.equals(str(order.get("userId"))))
+            {
+                continue;
+            }
+            if (requireCourse && courseId.length() > 0 && !courseId.equals(str(order.get("courseId"))))
+            {
+                continue;
+            }
+            String score = str(order.get("recentExamScore")).trim();
+            if (score.length() > 0)
+            {
+                return score;
+            }
+        }
+        return "";
     }
 
     @SuppressWarnings("unchecked")
