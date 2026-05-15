@@ -532,12 +532,13 @@ public class CourseApiController
     {
         String code = normalizeCardCode(body.get("code"));
         String studentName = str(body.get("studentName")).trim();
+        String recentExamScore = str(body.get("recentExamScore")).trim();
         String grade = str(body.get("grade")).trim();
         String schoolName = str(body.get("schoolName")).trim();
         String region = str(body.get("region")).trim();
-        if (code.length() == 0 || studentName.length() == 0 || grade.length() == 0 || schoolName.length() == 0 || region.length() == 0)
+        if (code.length() == 0 || studentName.length() == 0 || recentExamScore.length() == 0 || grade.length() == 0 || schoolName.length() == 0 || region.length() == 0)
         {
-            return AjaxResult.error("请填写激活码、学生名字、年级、学校名字和所在地区");
+            return AjaxResult.error("请填写激活码、学生名字、科目最近考试分数、年级、学校名字和所在地区");
         }
         String courseId = cardCourseId(code);
         if (courseId.length() == 0)
@@ -546,6 +547,7 @@ public class CourseApiController
         }
         Map<String, Object> order = createOrderRecord(courseId, currentUser(request), "激活码开通", code);
         order.put("studentName", studentName);
+        order.put("recentExamScore", recentExamScore);
         order.put("grade", grade);
         order.put("schoolName", schoolName);
         order.put("region", region);
