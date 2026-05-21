@@ -31,6 +31,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mvn -B -pl ruoyi-admin -am package -DskipTests
+          test -f "ruoyi-admin/target/$APP_NAME"
+
       - name: Prepare SSH
         shell: bash
         run: |
@@ -43,62 +57,40 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           : > ~/.ssh/known_hosts
 
-      - name: Upload source archive
+      - name: Upload release artifacts
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=6 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=6 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
-          SOURCE_ARCHIVE="wangkejava-source.tar.gz"
 
-          git archive --format=tar.gz --output="$SOURCE_ARCHIVE" "$GITHUB_SHA"
-          test -s "$SOURCE_ARCHIVE"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR/source' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          timeout 2m scp $SCP_OPTS "$SOURCE_ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$SOURCE_ARCHIVE"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf '$RELEASE_DIR/$SOURCE_ARCHIVE' -C '$RELEASE_DIR/source'"
-          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+          retry() {
+            local max="$1"
+            shift
+            local i
+            for i in $(seq 1 "$max"); do
+              if "$@"; then
+                return 0
+              fi
+              [ "$i" = "$max" ] && return 1
+              sleep $((i * 10))
+            done
+          }
 
-      - name: Build release on server
-        shell: bash
-        run: |
-          set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
-          set -euo pipefail
-
-          SOURCE_DIR="$RELEASE_DIR/source"
-          test -d "$SOURCE_DIR"
-
-          if [ -x "$JAVA_HOME/bin/java" ]; then
-            export JAVA_HOME
-            export PATH="$JAVA_HOME/bin:$PATH"
+          retry 5 ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          retry 5 scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+          if [ -f sql/ry_20250522.sql ]; then
+            retry 5 scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
-
-          cd "$SOURCE_DIR"
-          BUILD_LOG="$RELEASE_DIR/build.log"
-          mvn -B -pl ruoyi-admin -am package -DskipTests > "$BUILD_LOG" 2>&1 &
-          BUILD_PID="$!"
-          while kill -0 "$BUILD_PID" >/dev/null 2>&1; do
-            tail -n 20 "$BUILD_LOG" || true
-            sleep 20
-          done
-          set +e
-          wait "$BUILD_PID"
-          BUILD_STATUS="$?"
-          set -e
-          tail -n 80 "$BUILD_LOG" || true
-          [ "$BUILD_STATUS" = "0" ]
-          test -f "ruoyi-admin/target/$APP_NAME"
-          cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
-          mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
-          REMOTE
+          retry 5 ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
 
       - name: Ensure database
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=6 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' bash -s" <<'REMOTE'
           set -euo pipefail
 
@@ -132,9 +124,9 @@ jobs:
 
           DB_EXISTS="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "show databases like 'ha'" || true)"
           if [ "$DB_EXISTS" != "ha" ]; then
-            test -f "$RELEASE_DIR/source/sql/ry_20250522.sql"
+            test -f "$RELEASE_DIR/ry_20250522.sql"
             MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "create database ha default character set utf8mb4 collate utf8mb4_general_ci"
-            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$RELEASE_DIR/source/sql/ry_20250522.sql"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$RELEASE_DIR/ry_20250522.sql"
           fi
           REMOTE
 
@@ -142,7 +134,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=6 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' LEGACY_APP_NAME='$LEGACY_APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
 
