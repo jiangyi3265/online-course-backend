@@ -818,12 +818,24 @@ public class CourseApiController
     public AjaxResult reinforce(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId)
     {
         List<Map<String, Object>> list = new ArrayList<>();
+        boolean changed = false;
+        int index = 0;
         for (Map<String, Object> item : reinforcePoints)
         {
             if (courseId.equals(item.get("courseId")))
             {
+                if (!item.containsKey("testCount"))
+                {
+                    item.put("testCount", defaultReinforceTestCount(index));
+                    changed = true;
+                }
                 list.add(item);
+                index++;
             }
+        }
+        if (changed)
+        {
+            persistData();
         }
         return AjaxResult.success(list);
     }
@@ -850,6 +862,12 @@ public class CourseApiController
             }
         }
         return AjaxResult.success(map("title", point.get("title"), "type", "reinforce", "point", point, "questions", publicQuestions(list)));
+    }
+
+    private static int defaultReinforceTestCount(int index)
+    {
+        int[] defaults = {3, 5, 2};
+        return defaults[Math.min(Math.max(index, 0), defaults.length - 1)];
     }
 
     @PostMapping("/app/ai/ask")
