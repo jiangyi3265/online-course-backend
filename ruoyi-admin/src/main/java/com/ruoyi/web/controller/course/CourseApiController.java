@@ -526,12 +526,56 @@ public class CourseApiController
     }
 
     @GetMapping("/app/wrongbook")
-    public AjaxResult wrongbook(HttpServletRequest request)
+    public AjaxResult wrongbook(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        return AjaxResult.success(wrongbookItems(filterByUser(wrongQuestions, user), source));
+    }
+
+    @GetMapping("/app/wrongbook/summary")
+    public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId, HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
         List<Map<String, Object>> list = filterByUser(wrongQuestions, user);
-        list.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
-        return AjaxResult.success(list);
+        List<Map<String, Object>> records = attemptRecords(filterByUser(attempts, user), "");
+        Map<String, Object> course = findCourse(courseId);
+        return AjaxResult.success(map(
+            "total", list.size(),
+            "pending", countWrongByMastered(list, false),
+            "mastered", countWrongByMastered(list, true),
+            "weak", weakWrongItems(list, "").size(),
+            "recordTotal", records.size(),
+            "sourceStats", wrongSourceStats(list),
+            "course", course == null ? new LinkedHashMap<String, Object>() : courseForApp(course, user)
+        ));
+    }
+
+    @GetMapping("/app/wrongbook/records")
+    public AjaxResult wrongbookRecords(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        List<Map<String, Object>> records = attemptRecords(filterByUser(attempts, user), source);
+        return AjaxResult.success(map(
+            "total", records.size(),
+            "courseCounts", attemptCourseCounts(records),
+            "records", records
+        ));
+    }
+
+    @GetMapping("/app/wrongbook/weak")
+    public AjaxResult weakWrongbook(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        return AjaxResult.success(weakWrongItems(filterByUser(wrongQuestions, user), source));
+    }
+
+    @GetMapping("/app/wrongbook/retry")
+    public AjaxResult wrongRetry(@RequestParam(required = false, defaultValue = "5") int count,
+                                 @RequestParam(required = false, defaultValue = "") String source,
+                                 HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        return AjaxResult.success(wrongRetryPaper(filterByUser(wrongQuestions, user), count, source));
     }
 
     @PostMapping("/app/wrongbook/mastered")
@@ -1804,7 +1848,9 @@ public class CourseApiController
             type = "practice";
         }
         Map<String, Object> answers = mapValue(payload.get("answers"));
-        List<Map<String, Object>> source = "reinforce".equals(type) ? questionsByIds(stringList(payload.get("questionIds"))) : questionsFor(title);
+        List<String> questionIds = stringList(payload.get("questionIds"));
+        List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
+        List<Map<String, Object>> source = questionIds.isEmpty() ? questionsFor(title) : questionsByIds(questionIds);
         int correct = 0;
         List<Map<String, Object>> details = new ArrayList<>();
         int index = 0;
@@ -1812,6 +1858,9 @@ public class CourseApiController
         {
             int selected = intValue(answers.get(q.get("id")));
             boolean ok = selected == intValue(q.get("answer"));
+            String sourceWrongId = index < sourceWrongIds.size() ? sourceWrongIds.get(index) : "";
+            Map<String, Object> sourceWrong = sourceWrongId.length() == 0 ? null : findById(wrongQuestions, sourceWrongId);
+            String originType = sourceWrong == null ? str(payload.get("originType")) : str(sourceWrong.get("type"));
             if (ok)
             {
                 correct++;
@@ -1822,8 +1871,14 @@ public class CourseApiController
                     "id", "wrong-" + System.currentTimeMillis() + "-" + index,
                     "userId", user == null ? null : user.get("id"),
                     "questionId", q.get("id"),
+                    "sourceWrongId", sourceWrongId,
+                    "originType", originType,
+                    "courseId", payload.get("courseId"),
+                    "courseTitle", resolveCourseTitle(payload.get("courseId")),
+                    "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
                     "title", title,
                     "type", type,
+                    "sourceType", sourceLabel(type),
                     "stem", q.get("stem"),
                     "options", q.get("options"),
                     "answer", q.get("answer"),
@@ -1831,19 +1886,30 @@ public class CourseApiController
                     "analysis", q.get("analysis"),
                     "knowledge", q.get("knowledge"),
                     "mastered", false,
+                    "retryCount", isWrongRetryType(type) ? 1 : 0,
+                    "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
                     "updatedAt", now()
                 );
                 wrongQuestions.add(wrong);
             }
             details.add(map("id", q.get("id"), "stem", q.get("stem"), "selected", selected, "answer", q.get("answer"), "correct", ok, "analysis", q.get("analysis"), "videoAnalysis", "视频解析已随课程讲解开放"));
+            Map<String, Object> detail = details.get(details.size() - 1);
+            detail.put("sourceWrongId", sourceWrongId);
+            detail.put("selectedText", optionText(q, selected));
+            detail.put("answerText", optionText(q, intValue(q.get("answer"))));
+            detail.put("videoAnalysis", "视频解析已随课程讲解开放");
             index++;
         }
+        updateWrongRetryStats(type, sourceWrongIds, details, user);
         Map<String, Object> attempt = map(
             "id", "attempt-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
             "courseId", payload.get("courseId"),
+            "courseTitle", resolveCourseTitle(payload.get("courseId")),
+            "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
             "title", title,
             "type", type,
+            "sourceType", sourceLabel(type),
             "total", source.size(),
             "correct", correct,
             "score", source.isEmpty() ? 0 : Math.round(correct * 100f / source.size()),
@@ -1874,11 +1940,12 @@ public class CourseApiController
     private static List<Map<String, Object>> questionsByIds(List<String> ids)
     {
         List<Map<String, Object>> list = new ArrayList<>();
-        for (Map<String, Object> q : questions)
+        for (String id : ids)
         {
-            if (ids.contains(q.get("id")))
+            Map<String, Object> question = findById(questions, id);
+            if (question != null)
             {
-                list.add(q);
+                list.add(question);
             }
         }
         return list;
@@ -1894,6 +1961,415 @@ public class CourseApiController
             list.add(item);
         }
         return list;
+    }
+
+    private static List<Map<String, Object>> wrongbookItems(List<Map<String, Object>> source, String sourceFilter)
+    {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Map<String, Object> wrong : source)
+        {
+            if (matchesWrongSource(wrong, sourceFilter))
+            {
+                list.add(wrongbookItem(wrong));
+            }
+        }
+        list.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
+        return list;
+    }
+
+    private static Map<String, Object> wrongbookItem(Map<String, Object> wrong)
+    {
+        Map<String, Object> item = new LinkedHashMap<>(wrong);
+        item.put("sourceType", sourceLabel(wrong.get("type")));
+        item.put("sourceTags", wrongSourceTags(wrong));
+        item.put("weak", isWeakWrong(wrong));
+        item.put("selectedText", optionText(wrong, intValue(wrong.get("selected"))));
+        item.put("answerText", optionText(wrong, intValue(wrong.get("answer"))));
+        item.put("statusText", Boolean.TRUE.equals(wrong.get("mastered")) ? "已掌握" : "未掌握");
+        return item;
+    }
+
+    private static List<String> wrongSourceTags(Map<String, Object> wrong)
+    {
+        LinkedHashSet<String> tags = new LinkedHashSet<>();
+        addTag(tags, wrong.get("knowledge"));
+        String type = str(wrong.get("type"));
+        String originType = str(wrong.get("originType"));
+        if (originType.length() > 0 && !originType.equals(type))
+        {
+            addTag(tags, sourceLabel(originType));
+        }
+        else
+        {
+            addTag(tags, sourceLabel(type));
+        }
+        if (isWrongRetryType(type) || intValue(wrong.get("retryCount")) > 0 || intValue(wrong.get("retryWrongCount")) > 0)
+        {
+            addTag(tags, "错题重练");
+        }
+        if (tags.isEmpty())
+        {
+            addTag(tags, wrong.get("title"));
+        }
+        return new ArrayList<>(tags);
+    }
+
+    private static void addTag(Set<String> tags, Object value)
+    {
+        String text = str(value).trim();
+        if (text.length() > 0)
+        {
+            tags.add(text);
+        }
+    }
+
+    private static boolean matchesWrongSource(Map<String, Object> wrong, String sourceFilter)
+    {
+        String filter = str(sourceFilter).trim();
+        if (filter.length() == 0 || "全部".equals(filter))
+        {
+            return true;
+        }
+        if (filter.equals(sourceLabel(wrong.get("type"))))
+        {
+            return true;
+        }
+        return wrongSourceTags(wrong).contains(filter);
+    }
+
+    private static boolean isWeakWrong(Map<String, Object> wrong)
+    {
+        return wrongSourceTags(wrong).size() >= 3 || intValue(wrong.get("retryWrongCount")) >= 2 || intValue(wrong.get("retryCount")) >= 3;
+    }
+
+    private static int countWrongByMastered(List<Map<String, Object>> list, boolean mastered)
+    {
+        int total = 0;
+        for (Map<String, Object> wrong : list)
+        {
+            if (Boolean.TRUE.equals(wrong.get("mastered")) == mastered)
+            {
+                total++;
+            }
+        }
+        return total;
+    }
+
+    private static List<Map<String, Object>> weakWrongItems(List<Map<String, Object>> source, String sourceFilter)
+    {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Map<String, Object> wrong : source)
+        {
+            if (isWeakWrong(wrong) && matchesWrongSource(wrong, sourceFilter))
+            {
+                list.add(wrongbookItem(wrong));
+            }
+        }
+        list.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
+        return list;
+    }
+
+    private static List<Map<String, Object>> wrongSourceStats(List<Map<String, Object>> source)
+    {
+        List<Map<String, Object>> stats = new ArrayList<>();
+        for (String label : Arrays.asList("全部", "章节扫雷", "复习测试", "真题讲练", "错题重练"))
+        {
+            int total = 0;
+            for (Map<String, Object> wrong : source)
+            {
+                if (matchesWrongSource(wrong, label))
+                {
+                    total++;
+                }
+            }
+            stats.add(map("label", label, "value", total));
+        }
+        return stats;
+    }
+
+    private static List<Map<String, Object>> attemptRecords(List<Map<String, Object>> source, String sourceFilter)
+    {
+        List<Map<String, Object>> records = new ArrayList<>();
+        for (Map<String, Object> attempt : source)
+        {
+            if (matchesAttemptSource(attempt, sourceFilter))
+            {
+                records.add(attemptRecord(attempt));
+            }
+        }
+        records.sort((a, b) -> str(b.get("completedAt")).compareTo(str(a.get("completedAt"))));
+        return records;
+    }
+
+    private static boolean matchesAttemptSource(Map<String, Object> attempt, String sourceFilter)
+    {
+        String filter = str(sourceFilter).trim();
+        return filter.length() == 0 || "全部".equals(filter) || filter.equals(sourceLabel(attempt.get("type")));
+    }
+
+    private static Map<String, Object> attemptRecord(Map<String, Object> attempt)
+    {
+        int total = intValue(attempt.get("total"));
+        int correct = intValue(attempt.get("correct"));
+        int score = intValue(attempt.get("score"));
+        String sourceType = sourceLabel(attempt.get("type"));
+        return map(
+            "id", attempt.get("id"),
+            "courseId", attempt.get("courseId"),
+            "courseTitle", displayCourseTitle(attempt),
+            "subjectTitle", displaySubjectTitle(attempt),
+            "title", attempt.get("title"),
+            "type", attempt.get("type"),
+            "sourceType", sourceType,
+            "score", score,
+            "scoreText", score + "/100 分",
+            "total", total,
+            "correct", correct,
+            "wrongCount", Math.max(0, total - correct),
+            "completedAt", attempt.get("createdAt"),
+            "details", attemptDetailRows(attempt)
+        );
+    }
+
+    private static List<Map<String, Object>> attemptDetailRows(Map<String, Object> attempt)
+    {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<Map<String, Object>> details = mapList(attempt.get("details"));
+        int total = details.size();
+        for (int i = 0; i < details.size(); i++)
+        {
+            Map<String, Object> detail = details.get(i);
+            Map<String, Object> question = findById(questions, str(detail.get("id")));
+            rows.add(map(
+                "questionNo", i + 1,
+                "total", total,
+                "stem", detail.get("stem"),
+                "myAnswer", answerLetter(detail.get("selected")),
+                "correctAnswer", answerLetter(detail.get("answer")),
+                "myAnswerText", question == null ? answerLetter(detail.get("selected")) : optionText(question, intValue(detail.get("selected"))),
+                "correctAnswerText", question == null ? answerLetter(detail.get("answer")) : optionText(question, intValue(detail.get("answer"))),
+                "correct", Boolean.TRUE.equals(detail.get("correct")),
+                "analysis", detail.get("analysis"),
+                "videoAnalysis", detail.get("videoAnalysis")
+            ));
+        }
+        return rows;
+    }
+
+    private static List<Map<String, Object>> attemptCourseCounts(List<Map<String, Object>> records)
+    {
+        Map<String, Integer> buckets = new LinkedHashMap<>();
+        for (Map<String, Object> record : records)
+        {
+            String label = str(record.get("subjectTitle"));
+            if (label.length() == 0)
+            {
+                label = str(record.get("courseTitle"));
+            }
+            if (label.length() == 0)
+            {
+                label = "高考数学";
+            }
+            buckets.put(label, buckets.containsKey(label) ? buckets.get(label) + 1 : 1);
+        }
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : buckets.entrySet())
+        {
+            list.add(map("label", entry.getKey(), "value", entry.getValue()));
+        }
+        return list;
+    }
+
+    private static Map<String, Object> wrongRetryPaper(List<Map<String, Object>> source, int count, String sourceFilter)
+    {
+        int limit = count <= 0 ? 5 : Math.min(count, 20);
+        List<Map<String, Object>> candidates = new ArrayList<>();
+        for (Map<String, Object> wrong : source)
+        {
+            if (!Boolean.TRUE.equals(wrong.get("mastered")) && matchesWrongSource(wrong, sourceFilter))
+            {
+                candidates.add(wrong);
+            }
+        }
+        candidates.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
+        List<Map<String, Object>> paperQuestions = new ArrayList<>();
+        List<String> sourceWrongIds = new ArrayList<>();
+        Set<String> seenQuestions = new LinkedHashSet<>();
+        for (Map<String, Object> wrong : candidates)
+        {
+            String questionId = str(wrong.get("questionId"));
+            if (questionId.length() == 0)
+            {
+                questionId = str(wrong.get("id"));
+            }
+            if (seenQuestions.contains(questionId))
+            {
+                continue;
+            }
+            Map<String, Object> question = publicQuestionForWrong(wrong);
+            if (question == null)
+            {
+                continue;
+            }
+            seenQuestions.add(questionId);
+            paperQuestions.add(question);
+            sourceWrongIds.add(str(wrong.get("id")));
+            if (paperQuestions.size() >= limit)
+            {
+                break;
+            }
+        }
+        return map(
+            "title", "错题重练",
+            "type", "wrongRetry",
+            "count", paperQuestions.size(),
+            "requestedCount", limit,
+            "availableCount", candidates.size(),
+            "sourceWrongIds", sourceWrongIds,
+            "questions", paperQuestions
+        );
+    }
+
+    private static Map<String, Object> publicQuestionForWrong(Map<String, Object> wrong)
+    {
+        Map<String, Object> question = findById(questions, str(wrong.get("questionId")));
+        if (question != null)
+        {
+            Map<String, Object> item = new LinkedHashMap<>(question);
+            item.remove("answer");
+            return item;
+        }
+        if (str(wrong.get("stem")).length() == 0)
+        {
+            return null;
+        }
+        return map(
+            "id", wrong.get("questionId"),
+            "stem", wrong.get("stem"),
+            "options", wrong.get("options"),
+            "knowledge", wrong.get("knowledge")
+        );
+    }
+
+    private static void updateWrongRetryStats(String type, List<String> sourceWrongIds, List<Map<String, Object>> details, Map<String, Object> user)
+    {
+        if (!isWrongRetryType(type))
+        {
+            return;
+        }
+        for (int i = 0; i < sourceWrongIds.size(); i++)
+        {
+            Map<String, Object> wrong = findById(wrongQuestions, sourceWrongIds.get(i));
+            if (wrong == null || !sameUser(wrong, user))
+            {
+                continue;
+            }
+            boolean correct = i < details.size() && Boolean.TRUE.equals(details.get(i).get("correct"));
+            wrong.put("retryCount", intValue(wrong.get("retryCount")) + 1);
+            if (!correct)
+            {
+                wrong.put("retryWrongCount", intValue(wrong.get("retryWrongCount")) + 1);
+            }
+            wrong.put("lastRetryCorrect", correct);
+            wrong.put("lastRetryAt", now());
+            wrong.put("updatedAt", now());
+        }
+    }
+
+    private static boolean isWrongRetryType(Object type)
+    {
+        String value = str(type);
+        return "wrongRetry".equals(value) || "wrong-retry".equals(value) || "错题重练".equals(value);
+    }
+
+    private static String sourceLabel(Object type)
+    {
+        String value = str(type);
+        if ("quiz".equals(value) || "章节扫雷".equals(value))
+        {
+            return "章节扫雷";
+        }
+        if ("reinforce".equals(value) || "复习测试".equals(value))
+        {
+            return "复习测试";
+        }
+        if (isWrongRetryType(value))
+        {
+            return "错题重练";
+        }
+        return "真题讲练";
+    }
+
+    private static String answerLetter(Object value)
+    {
+        int index = intValue(value);
+        if (index < 0)
+        {
+            return "--";
+        }
+        return String.valueOf((char) ('A' + index));
+    }
+
+    private static String optionText(Map<String, Object> source, int index)
+    {
+        Object optionsValue = source.get("options");
+        if (optionsValue instanceof List)
+        {
+            List<?> options = (List<?>) optionsValue;
+            if (index >= 0 && index < options.size())
+            {
+                return answerLetter(index) + ". " + str(options.get(index));
+            }
+        }
+        return answerLetter(index);
+    }
+
+    private static String resolveCourseTitle(Object courseId)
+    {
+        String id = str(courseId);
+        if (id.length() == 0)
+        {
+            return "";
+        }
+        Map<String, Object> course = findCourse(id);
+        return course == null ? id : str(course.get("courseName"));
+    }
+
+    private static String resolveSubjectTitle(Object courseId)
+    {
+        String id = str(courseId);
+        if (id.length() == 0)
+        {
+            return "高考数学";
+        }
+        Map<String, Object> course = findCourse(id);
+        if (course == null)
+        {
+            return "高考数学";
+        }
+        String title = str(course.get("title"));
+        return title.length() == 0 ? str(course.get("courseName")) : title;
+    }
+
+    private static String displayCourseTitle(Map<String, Object> attempt)
+    {
+        String title = str(attempt.get("courseTitle"));
+        if (title.length() > 0)
+        {
+            return title;
+        }
+        title = resolveCourseTitle(attempt.get("courseId"));
+        return title.length() == 0 ? "高考数学" : title;
+    }
+
+    private static String displaySubjectTitle(Map<String, Object> attempt)
+    {
+        String title = str(attempt.get("subjectTitle"));
+        if (title.length() > 0)
+        {
+            return title;
+        }
+        return resolveSubjectTitle(attempt.get("courseId"));
     }
 
     private static Map<String, Object> getStudySummary()
