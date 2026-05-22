@@ -106,6 +106,10 @@ public class CourseApiController
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
                 restoreProgress(data);
+                if (ensureGaokaoSupplementCourses())
+                {
+                    persistData();
+                }
             }
             catch (IOException e)
             {
@@ -1459,6 +1463,7 @@ public class CourseApiController
         courses.add(simpleCourse("gk-yingyu-full", "gaokao", "full", "高考英语2026", "/static/courses/gk-yingyu-full.jpg", 512, 18));
         courses.add(simpleCourse("gk-wuli-full", "gaokao", "full", "高考物理2026", "/static/courses/gk-wuli-full.jpg", 389, 19));
         courses.add(simpleCourse("gk-huaxue-full", "gaokao", "full", "高考化学2026", "/static/courses/gk-huaxue.jpg", 318, 20));
+        ensureGaokaoSupplementCourses();
 
         enrollments.add(map("id", "enr-1", "userId", "56596", "courseId", "zk-yingyu-full", "expiry", "2027-02-15", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
         enrollments.add(map("id", "enr-2", "userId", "56596", "courseId", "zk-shuxue-full", "expiry", "2027-02-14", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
@@ -1467,6 +1472,30 @@ public class CourseApiController
         enrollments.add(map("id", "enr-5", "userId", "56596", "courseId", "gk-wuli-full", "expiry", "2027-02-05", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
         enrollments.add(map("id", "enr-6", "userId", "56597", "courseId", "gk-math-full", "expiry", "2027-05-07", "status", "active", "source", "授权", "studentName", "李五", "grade", "高三", "region", "贵州贵阳"));
         enrollments.add(map("id", "enr-7", "userId", "56597", "courseId", "gk-wuli-full", "expiry", "2027-02-05", "status", "active", "source", "授权", "studentName", "李五", "grade", "高三", "region", "贵州贵阳"));
+    }
+
+    private static boolean ensureGaokaoSupplementCourses()
+    {
+        boolean changed = false;
+        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-trial", "gaokao", "trial", "高考生物2026", "/static/courses/gk-huaxue.jpg", 926, 11));
+        changed |= addCourseIfMissing(simpleCourse("gk-lishi-trial", "gaokao", "trial", "高考历史2026", "/static/courses/gk-dili-full.jpg", 884, 12));
+        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-trial", "gaokao", "trial", "高考政治2026", "/static/courses/gk-dili-full.jpg", 862, 13));
+        changed |= addCourseIfMissing(simpleCourse("gk-dili-trial", "gaokao", "trial", "高考地理2026", "/static/courses/gk-dili-full.jpg", 901, 14));
+        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-full", "gaokao", "full", "高考生物2026", "/static/courses/gk-huaxue.jpg", 296, 21));
+        changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史2026", "/static/courses/gk-dili-full.jpg", 284, 22));
+        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治2026", "/static/courses/gk-dili-full.jpg", 271, 23));
+        changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理2026", "/static/courses/gk-dili-full.jpg", 302, 24));
+        return changed;
+    }
+
+    private static boolean addCourseIfMissing(Map<String, Object> course)
+    {
+        if (findCourse(str(course.get("id"))) != null)
+        {
+            return false;
+        }
+        courses.add(course);
+        return true;
     }
 
     private static void initDocs()
