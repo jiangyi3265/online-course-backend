@@ -57,13 +57,14 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           : > ~/.ssh/known_hosts
 
-      - name: Upload release artifacts
+      - name: Upload source archive
         shell: bash
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
+          SOURCE_ARCHIVE="wangkejava-source.tar.gz"
 
           retry() {
             local max="$1"
@@ -78,18 +79,96 @@ jobs:
             done
           }
 
-          du -h "ruoyi-admin/target/$APP_NAME"
+          git archive --format=tar.gz --output="$SOURCE_ARCHIVE" "$GITHUB_SHA"
+          test -s "$SOURCE_ARCHIVE"
+          du -h "$SOURCE_ARCHIVE"
           echo "Creating remote release directory..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          echo "Uploading backend jar..."
-          retry 4 timeout 10m scp $SCP_OPTS "ruoyi-admin/target/$APP_NAME" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/source' && mkdir -p '$RELEASE_DIR/source' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          echo "Uploading backend source archive..."
+          retry 4 timeout 3m scp $SCP_OPTS "$SOURCE_ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$SOURCE_ARCHIVE"
           if [ -f sql/ry_20250522.sql ]; then
             echo "Uploading database bootstrap SQL..."
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
-          echo "Activating backend jar..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+          echo "Extracting backend source archive..."
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf '$RELEASE_DIR/$SOURCE_ARCHIVE' -C '$RELEASE_DIR/source'"
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+
+      - name: Build release on server
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+
+          timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          BUILD_SCRIPT="$RELEASE_DIR/build.sh"
+          cat > "$BUILD_SCRIPT" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          BUILD_LOG="$RELEASE_DIR/build.log"
+          STATUS_FILE="$RELEASE_DIR/build.status"
+          echo running > "$STATUS_FILE"
+
+          {
+            if [ -x "$JAVA_HOME/bin/java" ]; then
+              export JAVA_HOME
+              export PATH="$JAVA_HOME/bin:$PATH"
+            fi
+
+            cd "$RELEASE_DIR/source"
+            mvn -B -pl ruoyi-admin -am package -DskipTests
+            test -f "ruoyi-admin/target/$APP_NAME"
+            cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
+            mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
+            echo success > "$STATUS_FILE"
+          } > "$BUILD_LOG" 2>&1 || {
+            echo failure > "$STATUS_FILE"
+            exit 1
+          }
+          SCRIPT
+
+          sed -i 's/^          //' "$BUILD_SCRIPT"
+          chmod +x "$BUILD_SCRIPT"
+          export RELEASE_DIR APP_DIR APP_NAME JAVA_HOME
+          rm -f "$RELEASE_DIR/build.status"
+          nohup "$BUILD_SCRIPT" >/dev/null 2>&1 &
+          echo "remote build pid $!"
+          REMOTE
+
+          for i in $(seq 1 90); do
+            set +e
+            POLL_OUTPUT="$(timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_DIR='$RELEASE_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          STATUS_FILE="$RELEASE_DIR/build.status"
+          BUILD_LOG="$RELEASE_DIR/build.log"
+          if [ -f "$STATUS_FILE" ]; then
+            echo "STATUS=$(cat "$STATUS_FILE")"
+          else
+            echo "STATUS=pending"
+          fi
+          tail -n 30 "$BUILD_LOG" 2>/dev/null || true
+          REMOTE
+          )"
+            POLL_STATUS="$?"
+            set -e
+
+            echo "$POLL_OUTPUT"
+            if [ "$POLL_STATUS" != "0" ]; then
+              echo "poll attempt $i failed"
+            elif echo "$POLL_OUTPUT" | grep -q '^STATUS=success$'; then
+              exit 0
+            elif echo "$POLL_OUTPUT" | grep -q '^STATUS=failure$'; then
+              exit 1
+            fi
+
+            sleep 20
+          done
+
+          echo "server build timed out"
+          exit 1
 
       - name: Ensure database
         shell: bash
