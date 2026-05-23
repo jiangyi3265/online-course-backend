@@ -2,6 +2,7 @@ package com.ruoyi.web.controller.course;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
@@ -106,7 +108,12 @@ public class CourseApiController
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
                 restoreProgress(data);
+                boolean changed = normalizeWrongQuestions();
                 if (ensureGaokaoSupplementCourses())
+                {
+                    changed = true;
+                }
+                if (changed)
                 {
                     persistData();
                 }
@@ -702,12 +709,12 @@ public class CourseApiController
             "correct", correct ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "selected", selected, "answer", question.get("answer"), "correct", correct, "analysis", question.get("analysis")))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "selected", selected, "answer", question.get("answer"), "correct", correct, "analysis", question.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct)
         {
-            wrongQuestions.add(map(
+            recordWrongQuestion(map(
                 "id", "wrong-" + System.currentTimeMillis(),
                 "userId", user == null ? null : user.get("id"),
                 "questionId", question.get("id"),
@@ -718,13 +725,14 @@ public class CourseApiController
                 "answer", question.get("answer"),
                 "selected", selected,
                 "analysis", question.get("analysis"),
+                "videoAnalysisUrl", analysisVideoUrl(question),
                 "knowledge", question.get("knowledge"),
                 "mastered", false,
                 "updatedAt", now()
-            ));
+            ), user);
         }
         persistData();
-        return AjaxResult.success(map("correct", correct, "answer", question.get("answer"), "analysis", question.get("analysis"), "attempt", attempt));
+        return AjaxResult.success(map("correct", correct, "answer", question.get("answer"), "analysis", question.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
     }
 
     @GetMapping("/app/my/students")
@@ -1913,20 +1921,21 @@ public class CourseApiController
                     "answer", q.get("answer"),
                     "selected", selected,
                     "analysis", q.get("analysis"),
+                    "videoAnalysisUrl", analysisVideoUrl(q),
                     "knowledge", q.get("knowledge"),
                     "mastered", false,
                     "retryCount", isWrongRetryType(type) ? 1 : 0,
                     "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
                     "updatedAt", now()
                 );
-                wrongQuestions.add(wrong);
+                recordWrongQuestion(wrong, user);
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "selected", selected, "answer", q.get("answer"), "correct", ok, "analysis", q.get("analysis"), "videoAnalysis", "视频解析已随课程讲解开放"));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "selected", selected, "answer", q.get("answer"), "correct", ok, "analysis", q.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", optionText(q, selected));
             detail.put("answerText", optionText(q, intValue(q.get("answer"))));
-            detail.put("videoAnalysis", "视频解析已随课程讲解开放");
+            detail.put("videoAnalysisUrl", analysisVideoUrl(q));
             index++;
         }
         updateWrongRetryStats(type, sourceWrongIds, details, user);
@@ -1992,6 +2001,227 @@ public class CourseApiController
         return list;
     }
 
+    private static Map<String, Object> recordWrongQuestion(Map<String, Object> wrong, Map<String, Object> user)
+    {
+        if (str(wrong.get("updatedAt")).length() == 0)
+        {
+            wrong.put("updatedAt", now());
+        }
+        String questionKey = ensureWrongQuestionKey(wrong);
+        ensureWrongSourceTypes(wrong);
+        Map<String, Object> existing = findWrongByQuestion(user, questionKey);
+        if (existing == null)
+        {
+            wrong.put("mastered", false);
+            wrong.put("lastWrongAt", wrong.get("updatedAt"));
+            wrong.put("repeatWrongCount", Math.max(1, intValue(wrong.get("repeatWrongCount"))));
+            wrongQuestions.add(wrong);
+            return wrong;
+        }
+        mergeWrongQuestion(existing, wrong, true);
+        return existing;
+    }
+
+    private static Map<String, Object> findWrongByQuestion(Map<String, Object> user, String questionKey)
+    {
+        for (Map<String, Object> wrong : wrongQuestions)
+        {
+            if (sameUser(wrong, user) && questionKey.equals(ensureWrongQuestionKey(wrong)))
+            {
+                return wrong;
+            }
+        }
+        return null;
+    }
+
+    private static boolean normalizeWrongQuestions()
+    {
+        Map<String, Map<String, Object>> unique = new LinkedHashMap<>();
+        List<Map<String, Object>> normalized = new ArrayList<>();
+        boolean changed = false;
+        for (Map<String, Object> wrong : wrongQuestions)
+        {
+            boolean hadQuestionKey = str(wrong.get("questionKey")).trim().length() > 0;
+            boolean hadSourceTypes = wrong.get("sourceTypes") instanceof List;
+            boolean hadRepeatWrongCount = intValue(wrong.get("repeatWrongCount")) > 0;
+            String key = wrongRecordKey(wrong);
+            if (!hadQuestionKey || !hadSourceTypes || !hadRepeatWrongCount)
+            {
+                changed = true;
+            }
+            Map<String, Object> existing = unique.get(key);
+            if (existing == null)
+            {
+                ensureWrongSourceTypes(wrong);
+                if (intValue(wrong.get("repeatWrongCount")) <= 0)
+                {
+                    wrong.put("repeatWrongCount", 1);
+                }
+                unique.put(key, wrong);
+                normalized.add(wrong);
+                continue;
+            }
+            mergeWrongQuestion(existing, wrong, false);
+            changed = true;
+        }
+        if (changed)
+        {
+            wrongQuestions.clear();
+            wrongQuestions.addAll(normalized);
+        }
+        return changed;
+    }
+
+    private static String wrongRecordKey(Map<String, Object> wrong)
+    {
+        return str(wrong.get("userId")) + ":" + ensureWrongQuestionKey(wrong);
+    }
+
+    private static String ensureWrongQuestionKey(Map<String, Object> wrong)
+    {
+        String key = str(wrong.get("questionKey")).trim();
+        if (key.length() == 0)
+        {
+            key = str(wrong.get("questionId")).trim();
+        }
+        if (key.length() == 0)
+        {
+            key = questionFingerprint(wrong);
+        }
+        if (key.length() == 0)
+        {
+            key = str(wrong.get("id")).trim();
+        }
+        wrong.put("questionKey", key);
+        return key;
+    }
+
+    private static String questionFingerprint(Map<String, Object> question)
+    {
+        String seed = normalizeQuestionText(question.get("stem")) + "|"
+            + normalizeQuestionText(question.get("options")) + "|"
+            + normalizeQuestionText(question.get("answer"));
+        if (seed.replace("|", "").length() == 0)
+        {
+            return "";
+        }
+        return "fp-" + UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    private static String normalizeQuestionText(Object value)
+    {
+        if (value instanceof List)
+        {
+            StringBuilder text = new StringBuilder();
+            for (Object item : (List<?>) value)
+            {
+                if (text.length() > 0)
+                {
+                    text.append('|');
+                }
+                text.append(normalizeQuestionText(item));
+            }
+            return text.toString();
+        }
+        return str(value).replaceAll("\\s+", " ").trim();
+    }
+
+    private static void mergeWrongQuestion(Map<String, Object> target, Map<String, Object> source, boolean repeatedWrong)
+    {
+        mergeWrongSourceTypes(target, source);
+        String sourceUpdatedAt = str(source.get("updatedAt"));
+        String targetUpdatedAt = str(target.get("updatedAt"));
+        boolean sourceIsNewer = sourceUpdatedAt.length() > 0 && sourceUpdatedAt.compareTo(targetUpdatedAt) >= 0;
+        if (repeatedWrong || sourceIsNewer)
+        {
+            copyWrongSnapshot(target, source);
+            target.put("updatedAt", sourceUpdatedAt.length() == 0 ? now() : sourceUpdatedAt);
+        }
+        if (repeatedWrong)
+        {
+            target.put("mastered", false);
+            target.put("lastWrongAt", sourceUpdatedAt.length() == 0 ? now() : sourceUpdatedAt);
+            target.put("repeatWrongCount", Math.max(1, intValue(target.get("repeatWrongCount"))) + 1);
+            return;
+        }
+        target.put("repeatWrongCount", Math.max(1, intValue(target.get("repeatWrongCount"))) + Math.max(1, intValue(source.get("repeatWrongCount"))));
+        target.put("retryCount", intValue(target.get("retryCount")) + intValue(source.get("retryCount")));
+        target.put("retryWrongCount", intValue(target.get("retryWrongCount")) + intValue(source.get("retryWrongCount")));
+    }
+
+    private static void copyWrongSnapshot(Map<String, Object> target, Map<String, Object> source)
+    {
+        for (String key : Arrays.asList(
+            "questionId", "questionKey", "sourceWrongId", "originType", "courseId", "courseTitle", "subjectTitle",
+            "title", "type", "sourceType", "stem", "options", "answer", "selected", "analysis", "videoAnalysisUrl",
+            "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
+        {
+            if (source.containsKey(key))
+            {
+                target.put(key, source.get(key));
+            }
+        }
+        ensureWrongQuestionKey(target);
+    }
+
+    private static void mergeWrongSourceTypes(Map<String, Object> target, Map<String, Object> source)
+    {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        addWrongSourceTypes(types, target);
+        addWrongSourceTypes(types, source);
+        target.put("sourceTypes", new ArrayList<>(types));
+    }
+
+    private static List<String> ensureWrongSourceTypes(Map<String, Object> wrong)
+    {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        addWrongSourceTypes(types, wrong);
+        List<String> list = new ArrayList<>(types);
+        wrong.put("sourceTypes", list);
+        return list;
+    }
+
+    private static void addWrongSourceTypes(Set<String> types, Map<String, Object> wrong)
+    {
+        if (wrong == null)
+        {
+            return;
+        }
+        for (String type : stringList(wrong.get("sourceTypes")))
+        {
+            addWrongSourceType(types, type);
+        }
+        addWrongSourceType(types, wrong.get("type"));
+        addWrongSourceType(types, wrong.get("originType"));
+    }
+
+    private static void addWrongSourceType(Set<String> types, Object value)
+    {
+        String type = str(value).trim();
+        if (type.length() > 0)
+        {
+            types.add(type);
+        }
+    }
+
+    private static String analysisVideoUrl(Map<String, Object> question)
+    {
+        if (question == null)
+        {
+            return "";
+        }
+        String url = str(question.get("videoAnalysisUrl")).trim();
+        if (url.length() == 0)
+        {
+            url = str(question.get("analysisVideoUrl")).trim();
+        }
+        if (url.length() == 0)
+        {
+            url = str(question.get("explainVideoUrl")).trim();
+        }
+        return url;
+    }
+
     private static List<Map<String, Object>> wrongbookItems(List<Map<String, Object>> source, String sourceFilter)
     {
         List<Map<String, Object>> list = new ArrayList<>();
@@ -2023,13 +2253,21 @@ public class CourseApiController
         LinkedHashSet<String> tags = new LinkedHashSet<>();
         addTag(tags, wrong.get("knowledge"));
         String type = str(wrong.get("type"));
-        String originType = str(wrong.get("originType"));
-        if (originType.length() > 0 && !originType.equals(type))
+        List<String> sourceTypes = ensureWrongSourceTypes(wrong);
+        if (!sourceTypes.isEmpty())
         {
-            addTag(tags, sourceLabel(originType));
+            for (String sourceType : sourceTypes)
+            {
+                addTag(tags, sourceLabel(sourceType));
+            }
         }
         else
         {
+            String originType = str(wrong.get("originType"));
+            if (originType.length() > 0 && !originType.equals(type))
+            {
+                addTag(tags, sourceLabel(originType));
+            }
             addTag(tags, sourceLabel(type));
         }
         if (isWrongRetryType(type) || intValue(wrong.get("retryCount")) > 0 || intValue(wrong.get("retryWrongCount")) > 0)
@@ -2062,6 +2300,13 @@ public class CourseApiController
         if (filter.equals(sourceLabel(wrong.get("type"))))
         {
             return true;
+        }
+        for (String sourceType : ensureWrongSourceTypes(wrong))
+        {
+            if (filter.equals(sourceLabel(sourceType)))
+            {
+                return true;
+            }
         }
         return wrongSourceTags(wrong).contains(filter);
     }
@@ -2179,7 +2424,7 @@ public class CourseApiController
                 "correctAnswerText", question == null ? answerLetter(detail.get("answer")) : optionText(question, intValue(detail.get("answer"))),
                 "correct", Boolean.TRUE.equals(detail.get("correct")),
                 "analysis", detail.get("analysis"),
-                "videoAnalysis", detail.get("videoAnalysis")
+                "videoAnalysisUrl", detail.get("videoAnalysisUrl")
             ));
         }
         return rows;
@@ -2221,26 +2466,27 @@ public class CourseApiController
             }
         }
         candidates.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
-        List<Map<String, Object>> paperQuestions = new ArrayList<>();
-        List<String> sourceWrongIds = new ArrayList<>();
+        List<Map<String, Object>> uniqueCandidates = new ArrayList<>();
         Set<String> seenQuestions = new LinkedHashSet<>();
         for (Map<String, Object> wrong : candidates)
         {
-            String questionId = str(wrong.get("questionId"));
-            if (questionId.length() == 0)
-            {
-                questionId = str(wrong.get("id"));
-            }
-            if (seenQuestions.contains(questionId))
+            String questionKey = ensureWrongQuestionKey(wrong);
+            if (seenQuestions.contains(questionKey))
             {
                 continue;
             }
+            seenQuestions.add(questionKey);
+            uniqueCandidates.add(wrong);
+        }
+        List<Map<String, Object>> paperQuestions = new ArrayList<>();
+        List<String> sourceWrongIds = new ArrayList<>();
+        for (Map<String, Object> wrong : uniqueCandidates)
+        {
             Map<String, Object> question = publicQuestionForWrong(wrong);
             if (question == null)
             {
                 continue;
             }
-            seenQuestions.add(questionId);
             paperQuestions.add(question);
             sourceWrongIds.add(str(wrong.get("id")));
             if (paperQuestions.size() >= limit)
@@ -2253,7 +2499,7 @@ public class CourseApiController
             "type", "wrongRetry",
             "count", paperQuestions.size(),
             "requestedCount", limit,
-            "availableCount", candidates.size(),
+            "availableCount", uniqueCandidates.size(),
             "sourceWrongIds", sourceWrongIds,
             "questions", paperQuestions
         );
@@ -2276,7 +2522,8 @@ public class CourseApiController
             "id", wrong.get("questionId"),
             "stem", wrong.get("stem"),
             "options", wrong.get("options"),
-            "knowledge", wrong.get("knowledge")
+            "knowledge", wrong.get("knowledge"),
+            "videoAnalysisUrl", wrong.get("videoAnalysisUrl")
         );
     }
 
