@@ -44,7 +44,7 @@ public class CourseApiController
     private static final String SAMPLE_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
     private static final String DATA_FILE_NAME = "course-data.json";
     private static final Set<String> ALLOWED_TRIAL_SUBJECTS = Collections.unmodifiableSet(
-        new LinkedHashSet<>(Arrays.asList("yuwen", "shuxue", "math", "yingyu", "wuli", "huaxue"))
+        new LinkedHashSet<>(Arrays.asList("yuwen", "shuxue", "math", "gaokao-math", "yingyu", "wuli", "huaxue"))
     );
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
@@ -117,6 +117,10 @@ public class CourseApiController
                     changed = true;
                 }
                 if (removeUnsupportedTrialCourses())
+                {
+                    changed = true;
+                }
+                if (ensureCoreTrialCourses())
                 {
                     changed = true;
                 }
@@ -1530,6 +1534,22 @@ public class CourseApiController
         changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史2026", "/static/courses/gk-dili-full.jpg", 284, 22));
         changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治2026", "/static/courses/gk-dili-full.jpg", 271, 23));
         changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理2026", "/static/courses/gk-dili-full.jpg", 302, 24));
+        return changed;
+    }
+
+    private static boolean ensureCoreTrialCourses()
+    {
+        boolean changed = false;
+        changed |= addCourseIfMissing(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文2026", "/static/courses/zk-yuwen.jpg", 1086, 1));
+        changed |= addCourseIfMissing(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学2026", "/static/courses/zk-shuxue.jpg", 1456, 2));
+        changed |= addCourseIfMissing(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语2026", "/static/courses/zk-yingyu.jpg", 1289, 3));
+        changed |= addCourseIfMissing(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理2026", "/static/courses/zk-wuli.jpg", 1176, 4));
+        changed |= addCourseIfMissing(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学2026", "/static/courses/zk-huaxue.jpg", 1237, 5));
+        changed |= addCourseIfMissing(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文2026", "/static/courses/gk-yuwen.jpg", 1078, 6));
+        changed |= addCourseIfMissing(mathTrial());
+        changed |= addCourseIfMissing(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语2026", "/static/courses/gk-yingyu.jpg", 1360, 8));
+        changed |= addCourseIfMissing(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理2026", "/static/courses/gk-wuli.jpg", 1121, 9));
+        changed |= addCourseIfMissing(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学2026", "/static/courses/gk-huaxue.jpg", 980, 10));
         return changed;
     }
 
