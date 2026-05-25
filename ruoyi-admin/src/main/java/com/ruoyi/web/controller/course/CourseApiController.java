@@ -43,6 +43,9 @@ public class CourseApiController
 {
     private static final String SAMPLE_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
     private static final String DATA_FILE_NAME = "course-data.json";
+    private static final Set<String> ALLOWED_TRIAL_SUBJECTS = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList("yuwen", "shuxue", "math", "yingyu", "wuli", "huaxue"))
+    );
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final Object storeLock = new Object();
@@ -109,6 +112,14 @@ public class CourseApiController
                 restoreList(data, "aiChats", aiChats);
                 restoreProgress(data);
                 boolean changed = normalizeWrongQuestions();
+                if (ensureBindTestStudent())
+                {
+                    changed = true;
+                }
+                if (removeUnsupportedTrialCourses())
+                {
+                    changed = true;
+                }
                 if (ensureGaokaoSupplementCourses())
                 {
                     changed = true;
@@ -1447,6 +1458,36 @@ public class CourseApiController
         users.add(map("phone", "13800138000", "password", "123456", "name", "张三", "id", "56596", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
         users.add(map("phone", "13900139000", "password", "123456", "name", "李五", "id", "56597", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
         users.add(map("phone", "18888888888", "password", "888888", "name", "王老师", "id", "10001", "tenantId", 52, "role", "teacher", "status", "active"));
+        ensureBindTestStudent();
+    }
+
+    private static boolean ensureBindTestStudent()
+    {
+        for (Map<String, Object> user : users)
+        {
+            if ("19078827319".equals(user.get("phone")))
+            {
+                boolean changed = false;
+                if (!"123456".equals(user.get("password")))
+                {
+                    user.put("password", "123456");
+                    changed = true;
+                }
+                if (!"student".equals(user.get("role")))
+                {
+                    user.put("role", "student");
+                    changed = true;
+                }
+                if (!"active".equals(user.get("status")))
+                {
+                    user.put("status", "active");
+                    changed = true;
+                }
+                return changed;
+            }
+        }
+        users.add(map("phone", "19078827319", "password", "123456", "name", "绑定测试学生", "id", "19078827319", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
+        return true;
     }
 
     private static void initCourses()
@@ -1485,15 +1526,31 @@ public class CourseApiController
     private static boolean ensureGaokaoSupplementCourses()
     {
         boolean changed = false;
-        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-trial", "gaokao", "trial", "高考生物2026", "/static/courses/gk-huaxue.jpg", 926, 11));
-        changed |= addCourseIfMissing(simpleCourse("gk-lishi-trial", "gaokao", "trial", "高考历史2026", "/static/courses/gk-dili-full.jpg", 884, 12));
-        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-trial", "gaokao", "trial", "高考政治2026", "/static/courses/gk-dili-full.jpg", 862, 13));
-        changed |= addCourseIfMissing(simpleCourse("gk-dili-trial", "gaokao", "trial", "高考地理2026", "/static/courses/gk-dili-full.jpg", 901, 14));
         changed |= addCourseIfMissing(simpleCourse("gk-shengwu-full", "gaokao", "full", "高考生物2026", "/static/courses/gk-huaxue.jpg", 296, 21));
         changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史2026", "/static/courses/gk-dili-full.jpg", 284, 22));
         changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治2026", "/static/courses/gk-dili-full.jpg", 271, 23));
         changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理2026", "/static/courses/gk-dili-full.jpg", 302, 24));
         return changed;
+    }
+
+    private static boolean removeUnsupportedTrialCourses()
+    {
+        return courses.removeIf(course -> !isAllowedTrialCourse(course));
+    }
+
+    private static boolean isAllowedTrialCourse(Map<String, Object> course)
+    {
+        if (!"trial".equals(course.get("kind")))
+        {
+            return true;
+        }
+        String subject = str(course.get("subject")).trim();
+        if (subject.length() == 0)
+        {
+            subject = str(course.get("id")).trim();
+        }
+        subject = subject.replaceAll("^(zk|gk)-", "").replaceAll("-(trial|full)$", "");
+        return ALLOWED_TRIAL_SUBJECTS.contains(subject);
     }
 
     private static boolean addCourseIfMissing(Map<String, Object> course)
@@ -1671,6 +1728,10 @@ public class CourseApiController
         String status = params.get("status");
         for (Map<String, Object> course : courses)
         {
+            if (!isAllowedTrialCourse(course))
+            {
+                continue;
+            }
             if (tab != null && tab.length() > 0)
             {
                 int index = Integer.parseInt(tab);
