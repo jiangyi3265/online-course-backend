@@ -641,18 +641,20 @@ public class CourseApiController
     }
 
     @GetMapping("/app/wrongbook")
-    public AjaxResult wrongbook(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    public AjaxResult wrongbook(@RequestParam(required = false, defaultValue = "") String source,
+                                @RequestParam(required = false, defaultValue = "") String courseId,
+                                HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
-        return AjaxResult.success(wrongbookItems(filterByUser(wrongQuestions, user), source));
+        return AjaxResult.success(wrongbookItems(filterByCourse(filterByUser(wrongQuestions, user), courseId), source));
     }
 
     @GetMapping("/app/wrongbook/summary")
     public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId, HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
-        List<Map<String, Object>> list = filterByUser(wrongQuestions, user);
-        List<Map<String, Object>> records = attemptRecords(filterByUser(attempts, user), "");
+        List<Map<String, Object>> list = filterByCourse(filterByUser(wrongQuestions, user), courseId);
+        List<Map<String, Object>> records = attemptRecords(filterByCourse(filterByUser(attempts, user), courseId), "");
         Map<String, Object> course = findCourse(courseId);
         return AjaxResult.success(map(
             "total", list.size(),
@@ -668,10 +670,12 @@ public class CourseApiController
     }
 
     @GetMapping("/app/wrongbook/records")
-    public AjaxResult wrongbookRecords(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    public AjaxResult wrongbookRecords(@RequestParam(required = false, defaultValue = "") String source,
+                                       @RequestParam(required = false, defaultValue = "") String courseId,
+                                       HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
-        List<Map<String, Object>> records = attemptRecords(filterByUser(attempts, user), source);
+        List<Map<String, Object>> records = attemptRecords(filterByCourse(filterByUser(attempts, user), courseId), source);
         return AjaxResult.success(map(
             "total", records.size(),
             "courseCounts", attemptCourseCounts(records),
@@ -680,19 +684,22 @@ public class CourseApiController
     }
 
     @GetMapping("/app/wrongbook/weak")
-    public AjaxResult weakWrongbook(@RequestParam(required = false, defaultValue = "") String source, HttpServletRequest request)
+    public AjaxResult weakWrongbook(@RequestParam(required = false, defaultValue = "") String source,
+                                    @RequestParam(required = false, defaultValue = "") String courseId,
+                                    HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
-        return AjaxResult.success(weakWrongItems(filterByUser(wrongQuestions, user), source));
+        return AjaxResult.success(weakWrongItems(filterByCourse(filterByUser(wrongQuestions, user), courseId), source));
     }
 
     @GetMapping("/app/wrongbook/retry")
     public AjaxResult wrongRetry(@RequestParam(required = false, defaultValue = "5") int count,
                                  @RequestParam(required = false, defaultValue = "") String source,
+                                 @RequestParam(required = false, defaultValue = "") String courseId,
                                  HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
-        return AjaxResult.success(wrongRetryPaper(filterByUser(wrongQuestions, user), count, source));
+        return AjaxResult.success(wrongRetryPaper(filterByCourse(filterByUser(wrongQuestions, user), courseId), count, source));
     }
 
     @PostMapping("/app/wrongbook/mastered")
@@ -3980,6 +3987,25 @@ public class CourseApiController
         for (Map<String, Object> item : list)
         {
             if (user == null || sameUser(item, user))
+            {
+                result.add(item);
+            }
+        }
+        return result;
+    }
+
+    private static List<Map<String, Object>> filterByCourse(List<Map<String, Object>> list, String courseId)
+    {
+        String expected = str(courseId);
+        if (expected.length() == 0)
+        {
+            return list;
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> item : list)
+        {
+            String itemCourseId = str(item.get("courseId"));
+            if (itemCourseId.length() == 0 || expected.equals(itemCourseId))
             {
                 result.add(item);
             }
