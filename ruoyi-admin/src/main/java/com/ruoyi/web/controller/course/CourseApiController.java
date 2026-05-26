@@ -60,6 +60,7 @@ public class CourseApiController
     private static final List<Map<String, Object>> authRequests = new ArrayList<>();
     private static final List<Map<String, Object>> activationCodes = new ArrayList<>();
     private static final List<Map<String, Object>> favorites = new ArrayList<>();
+    private static final List<Map<String, Object>> feedbacks = new ArrayList<>();
     private static final List<Map<String, Object>> studentBindings = new ArrayList<>();
     private static final List<Map<String, Object>> attempts = new ArrayList<>();
     private static final List<Map<String, Object>> wrongQuestions = new ArrayList<>();
@@ -105,6 +106,7 @@ public class CourseApiController
                 restoreList(data, "authRequests", authRequests);
                 restoreList(data, "activationCodes", activationCodes);
                 restoreList(data, "favorites", favorites);
+                restoreList(data, "feedbacks", feedbacks);
                 restoreList(data, "studentBindings", studentBindings);
                 restoreList(data, "attempts", attempts);
                 restoreList(data, "wrongQuestions", wrongQuestions);
@@ -125,6 +127,10 @@ public class CourseApiController
                     changed = true;
                 }
                 if (ensureGaokaoSupplementCourses())
+                {
+                    changed = true;
+                }
+                if (ensureGaokaoReinforcePoints())
                 {
                     changed = true;
                 }
@@ -241,6 +247,85 @@ public class CourseApiController
             }
         }
         return AjaxResult.error("手机号未注册");
+    }
+
+    @GetMapping("/app/profile")
+    public AjaxResult appProfile(HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        return AjaxResult.success(user == null ? new LinkedHashMap<String, Object>() : publicUser(user));
+    }
+
+    @PostMapping("/app/profile")
+    public AjaxResult updateProfile(@RequestBody Map<String, Object> body, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        if (user == null)
+        {
+            return AjaxResult.error("请先登录");
+        }
+        String phone = str(body.get("phone")).trim();
+        if (phone.length() > 0 && !phone.equals(str(user.get("phone"))))
+        {
+            if (!phone.matches("^1\\d{10}$"))
+            {
+                return AjaxResult.error("请输入正确的手机号");
+            }
+            for (Map<String, Object> item : users)
+            {
+                if (!str(user.get("id")).equals(str(item.get("id"))) && phone.equals(str(item.get("phone"))))
+                {
+                    return AjaxResult.error("手机号已被其他账号使用");
+                }
+            }
+            user.put("phone", phone);
+        }
+        putIfPresent(user, body, "avatar");
+        putIfPresent(user, body, "name");
+        putIfPresent(user, body, "nickname");
+        putIfPresent(user, body, "realName");
+        putIfPresent(user, body, "address");
+        putIfPresent(user, body, "wechat");
+        putIfPresent(user, body, "wechatBound");
+        putIfPresent(user, body, "faceUploaded");
+        putIfPresent(user, body, "answerAudioEnabled");
+        String password = str(body.get("password"));
+        if (password.length() > 0)
+        {
+            if (password.length() < 6 || password.length() > 32)
+            {
+                return AjaxResult.error("密码长度需为 6 到 32 位");
+            }
+            user.put("password", password);
+        }
+        user.put("updatedAt", now());
+        persistData();
+        return AjaxResult.success(publicUser(user));
+    }
+
+    @PostMapping("/app/feedback")
+    public AjaxResult submitFeedback(@RequestBody Map<String, Object> body, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        String content = str(body.get("content")).trim();
+        if (content.length() == 0)
+        {
+            return AjaxResult.error("请输入反馈内容");
+        }
+        Map<String, Object> feedback = map(
+            "id", "feedback-" + System.currentTimeMillis(),
+            "userId", user == null ? null : user.get("id"),
+            "userName", user == null ? "" : user.get("name"),
+            "phone", str(body.get("phone")).trim(),
+            "wechat", str(body.get("wechat")).trim(),
+            "content", content,
+            "images", stringList(body.get("images")),
+            "status", "new",
+            "createdAt", now()
+        );
+        feedbacks.add(feedback);
+        persistData();
+        return AjaxResult.success(feedback);
     }
 
     @GetMapping("/app/courses")
@@ -567,6 +652,8 @@ public class CourseApiController
         Map<String, Object> course = findCourse(courseId);
         return AjaxResult.success(map(
             "total", list.size(),
+            "latest", countLatestWrong(list),
+            "latestAt", latestWrongAt(list),
             "pending", countWrongByMastered(list, false),
             "mastered", countWrongByMastered(list, true),
             "weak", weakWrongItems(list, "").size(),
@@ -683,6 +770,10 @@ public class CourseApiController
             Map<String, Object> item = favorites.get(i);
             if (type.equals(item.get("type")) && targetId.equals(item.get("targetId")) && sameUser(item, user))
             {
+                if ("add".equals(str(body.get("action"))))
+                {
+                    return AjaxResult.success(map("favorited", true, "favorite", item));
+                }
                 favorites.remove(i);
                 persistData();
                 return AjaxResult.success(map("favorited", false));
@@ -1341,6 +1432,7 @@ public class CourseApiController
             "lessonProgress", new ArrayList<>(lessonProgress.values()),
             "lessonRatings", lessonRatings,
             "aiChats", aiChats,
+            "feedbacks", feedbacks,
             "reinforcePoints", reinforcePoints,
             "studyPlans", studyPlans
         ));
@@ -1391,6 +1483,7 @@ public class CourseApiController
         data.put("authRequests", copyList(authRequests));
         data.put("activationCodes", copyList(activationCodes));
         data.put("favorites", copyList(favorites));
+        data.put("feedbacks", copyList(feedbacks));
         data.put("studentBindings", copyList(studentBindings));
         data.put("attempts", copyList(attempts));
         data.put("wrongQuestions", copyList(wrongQuestions));
@@ -1537,6 +1630,59 @@ public class CourseApiController
         return changed;
     }
 
+    private static boolean ensureGaokaoReinforcePoints()
+    {
+        String[] titles = {
+            "根据实际问题选择函数类型", "指数函数图象特征与底数的关系", "指数式与对数式的互化", "分段函数的应用",
+            "复数乘除的模", "复数加减的模", "集合与不等式", "平面向量坐标运算", "函数与导数单调性",
+            "极值点效应", "数列通项公式", "数列求和问题", "三角函数合一变形", "立体几何线面关系",
+            "圆锥曲线焦点弦", "概率与统计分布列", "导数压轴题构造"
+        };
+        String[] pointIds = {
+            "kp-logic", "kp-derivative", "kp-series", "kp-gk-math-4", "kp-gk-math-5", "kp-gk-math-6",
+            "kp-gk-math-7", "kp-gk-math-8", "kp-gk-math-9", "kp-gk-math-10", "kp-gk-math-11",
+            "kp-gk-math-12", "kp-gk-math-13", "kp-gk-math-14", "kp-gk-math-15", "kp-gk-math-16", "kp-gk-math-17"
+        };
+        String[] questionIds = {"q-logic-1", "q-logic-2", "q-derivative-1", "q-series-1"};
+        boolean changed = false;
+        for (int i = 0; i < titles.length; i++)
+        {
+            String id = pointIds[i];
+            Map<String, Object> existing = findById(reinforcePoints, id);
+            if (existing != null)
+            {
+                if (!titles[i].equals(existing.get("title")))
+                {
+                    existing.put("title", titles[i]);
+                    changed = true;
+                }
+                if (!"gk-math-full".equals(existing.get("courseId")))
+                {
+                    existing.put("courseId", "gk-math-full");
+                    changed = true;
+                }
+                if (str(existing.get("createdAt")).length() == 0)
+                {
+                    existing.put("createdAt", "2026-01-25T19:57:51");
+                    changed = true;
+                }
+                continue;
+            }
+            reinforcePoints.add(map(
+                "id", id,
+                "courseId", "gk-math-full",
+                "title", titles[i],
+                "mastery", Math.max(12, 76 - i * 3),
+                "status", "未学",
+                "testCount", 0,
+                "createdAt", "2026-01-25T19:57:51",
+                "questionIds", Arrays.asList(questionIds[i % questionIds.length])
+            ));
+            changed = true;
+        }
+        return changed;
+    }
+
     private static boolean ensureCoreTrialCourses()
     {
         boolean changed = false;
@@ -1615,6 +1761,7 @@ public class CourseApiController
         reinforcePoints.add(map("id", "kp-logic", "courseId", "gk-math-full", "title", "集合与逻辑", "mastery", 68, "status", "待复习", "testCount", 3, "questionIds", Arrays.asList("q-logic-1", "q-logic-2")));
         reinforcePoints.add(map("id", "kp-derivative", "courseId", "gk-math-full", "title", "导数基础", "mastery", 74, "status", "复习中", "testCount", 5, "questionIds", Arrays.asList("q-derivative-1")));
         reinforcePoints.add(map("id", "kp-series", "courseId", "gk-math-full", "title", "数列通项", "mastery", 58, "status", "薄弱", "testCount", 2, "questionIds", Arrays.asList("q-series-1")));
+        ensureGaokaoReinforcePoints();
         studyPlans.add(map("courseId", "gk-math-full", "title", "高考数学阶段学案", "tasks", list(
             map("id", "plan-1", "title", "复习集合交集与补集", "type", "知识回顾", "done", true),
             map("id", "plan-2", "title", "完成导数基础 3 道巩固题", "type", "训练任务", "done", false),
@@ -2378,6 +2525,10 @@ public class CourseApiController
         {
             return true;
         }
+        if ("最新错题".equals(filter))
+        {
+            return isLatestWrong(wrong);
+        }
         if (filter.equals(sourceLabel(wrong.get("type"))))
         {
             return true;
@@ -2390,6 +2541,45 @@ public class CourseApiController
             }
         }
         return wrongSourceTags(wrong).contains(filter);
+    }
+
+    private static boolean isLatestWrong(Map<String, Object> wrong)
+    {
+        try
+        {
+            return LocalDateTime.parse(str(wrong.get("updatedAt"))).isAfter(LocalDateTime.now().minusHours(24));
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static int countLatestWrong(List<Map<String, Object>> list)
+    {
+        int total = 0;
+        for (Map<String, Object> wrong : list)
+        {
+            if (isLatestWrong(wrong))
+            {
+                total++;
+            }
+        }
+        return total;
+    }
+
+    private static String latestWrongAt(List<Map<String, Object>> list)
+    {
+        String latest = "";
+        for (Map<String, Object> wrong : list)
+        {
+            String updatedAt = str(wrong.get("updatedAt"));
+            if (updatedAt.compareTo(latest) > 0)
+            {
+                latest = updatedAt;
+            }
+        }
+        return latest;
     }
 
     private static boolean isWeakWrong(Map<String, Object> wrong)
@@ -2427,7 +2617,7 @@ public class CourseApiController
     private static List<Map<String, Object>> wrongSourceStats(List<Map<String, Object>> source)
     {
         List<Map<String, Object>> stats = new ArrayList<>();
-        for (String label : Arrays.asList("全部", "章节扫雷", "复习测试", "真题讲练", "错题重练"))
+        for (String label : Arrays.asList("全部", "最新错题", "章节扫雷", "复习测试", "真题讲练", "错题重练"))
         {
             int total = 0;
             for (Map<String, Object> wrong : source)
