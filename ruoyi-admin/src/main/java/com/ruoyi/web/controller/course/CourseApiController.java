@@ -134,6 +134,10 @@ public class CourseApiController
                 {
                     changed = true;
                 }
+                if (ensureCourseDocDefaults())
+                {
+                    changed = true;
+                }
                 if (changed)
                 {
                     persistData();
@@ -367,9 +371,9 @@ public class CourseApiController
             {
                 list.add(map(
                     "id", course.get("id"),
-                    "title", course.get("courseName"),
-                    "courseName", course.get("courseName"),
-                    "sub", course.get("introduction"),
+                    "title", stripCourseYear(course.get("courseName")),
+                    "courseName", stripCourseYear(course.get("courseName")),
+                    "sub", stripCourseYear(course.get("introduction")),
                     "expiry", enrollment.get("expiry"),
                     "cover", course.get("cover"),
                     "subject", course.get("subject"),
@@ -422,7 +426,7 @@ public class CourseApiController
         Map<String, Object> course = findCourse(courseId);
         if (course != null)
         {
-            courseTitle = str(course.get("courseName"));
+            courseTitle = stripCourseYear(course.get("courseName"));
         }
         int wrongCount = 0;
         for (Map<String, Object> wrong : filterByUser(wrongQuestions, user))
@@ -727,7 +731,7 @@ public class CourseApiController
                 Map<String, Object> item = new LinkedHashMap<>(favorite);
                 if (course != null)
                 {
-                    item.put("title", course.get("courseName"));
+                item.put("title", stripCourseYear(course.get("courseName")));
                     item.put("cover", course.get("cover"));
                     item.put("subject", course.get("subject"));
                     item.put("kind", course.get("kind"));
@@ -1192,6 +1196,14 @@ public class CourseApiController
         {
             doc.put("id", "doc-" + System.currentTimeMillis());
         }
+        if (str(doc.get("category")).length() == 0)
+        {
+            doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
+        }
+        if (str(doc.get("uploadTime")).length() == 0)
+        {
+            doc.put("uploadTime", now());
+        }
         docs.add(doc);
         persistData();
         return AjaxResult.success(doc);
@@ -1589,26 +1601,26 @@ public class CourseApiController
 
     private static void initCourses()
     {
-        courses.add(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文2026", "/static/courses/zk-yuwen.jpg", 1086, 1));
-        courses.add(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学2026", "/static/courses/zk-shuxue.jpg", 1456, 2));
-        courses.add(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语2026", "/static/courses/zk-yingyu.jpg", 1289, 3));
-        courses.add(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理2026", "/static/courses/zk-wuli.jpg", 1176, 4));
-        courses.add(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学2026", "/static/courses/zk-huaxue.jpg", 1237, 5));
-        courses.add(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文2026", "/static/courses/gk-yuwen.jpg", 1078, 6));
+        courses.add(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文", "/static/courses/zk-yuwen.jpg", 1086, 1));
+        courses.add(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学", "/static/courses/zk-shuxue.jpg", 1456, 2));
+        courses.add(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语", "/static/courses/zk-yingyu.jpg", 1289, 3));
+        courses.add(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理", "/static/courses/zk-wuli.jpg", 1176, 4));
+        courses.add(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学", "/static/courses/zk-huaxue.jpg", 1237, 5));
+        courses.add(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文", "/static/courses/gk-yuwen.jpg", 1078, 6));
         courses.add(mathTrial());
-        courses.add(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语2026", "/static/courses/gk-yingyu.jpg", 1360, 8));
-        courses.add(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理2026", "/static/courses/gk-wuli.jpg", 1121, 9));
-        courses.add(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学2026", "/static/courses/gk-huaxue.jpg", 980, 10));
-        courses.add(simpleCourse("zk-yuwen-full", "zhongkao", "full", "中考语文2026", "/static/courses/zk-yuwen.jpg", 438, 11));
-        courses.add(simpleCourse("zk-shuxue-full", "zhongkao", "full", "中考数学2026", "/static/courses/zk-shuxue.jpg", 521, 12));
-        courses.add(simpleCourse("zk-yingyu-full", "zhongkao", "full", "中考英语2026", "/static/courses/zk-yingyu.jpg", 487, 13));
-        courses.add(simpleCourse("zk-wuli-full", "zhongkao", "full", "中考物理2026", "/static/courses/zk-wuli.jpg", 366, 14));
-        courses.add(simpleCourse("zk-huaxue-full", "zhongkao", "full", "中考化学2026", "/static/courses/zk-huaxue.jpg", 342, 15));
-        courses.add(simpleCourse("gk-yuwen-full", "gaokao", "full", "高考语文2026", "/static/courses/gk-yuwen.jpg", 406, 16));
+        courses.add(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语", "/static/courses/gk-yingyu.jpg", 1360, 8));
+        courses.add(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理", "/static/courses/gk-wuli.jpg", 1121, 9));
+        courses.add(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学", "/static/courses/gk-huaxue.jpg", 980, 10));
+        courses.add(simpleCourse("zk-yuwen-full", "zhongkao", "full", "中考语文", "/static/courses/zk-yuwen.jpg", 438, 11));
+        courses.add(simpleCourse("zk-shuxue-full", "zhongkao", "full", "中考数学", "/static/courses/zk-shuxue.jpg", 521, 12));
+        courses.add(simpleCourse("zk-yingyu-full", "zhongkao", "full", "中考英语", "/static/courses/zk-yingyu.jpg", 487, 13));
+        courses.add(simpleCourse("zk-wuli-full", "zhongkao", "full", "中考物理", "/static/courses/zk-wuli.jpg", 366, 14));
+        courses.add(simpleCourse("zk-huaxue-full", "zhongkao", "full", "中考化学", "/static/courses/zk-huaxue.jpg", 342, 15));
+        courses.add(simpleCourse("gk-yuwen-full", "gaokao", "full", "高考语文", "/static/courses/gk-yuwen.jpg", 406, 16));
         courses.add(mathFull());
-        courses.add(simpleCourse("gk-yingyu-full", "gaokao", "full", "高考英语2026", "/static/courses/gk-yingyu-full.jpg", 512, 18));
-        courses.add(simpleCourse("gk-wuli-full", "gaokao", "full", "高考物理2026", "/static/courses/gk-wuli-full.jpg", 389, 19));
-        courses.add(simpleCourse("gk-huaxue-full", "gaokao", "full", "高考化学2026", "/static/courses/gk-huaxue.jpg", 318, 20));
+        courses.add(simpleCourse("gk-yingyu-full", "gaokao", "full", "高考英语", "/static/courses/gk-yingyu-full.jpg", 512, 18));
+        courses.add(simpleCourse("gk-wuli-full", "gaokao", "full", "高考物理", "/static/courses/gk-wuli-full.jpg", 389, 19));
+        courses.add(simpleCourse("gk-huaxue-full", "gaokao", "full", "高考化学", "/static/courses/gk-huaxue.jpg", 318, 20));
         ensureGaokaoSupplementCourses();
 
         enrollments.add(map("id", "enr-1", "userId", "56596", "courseId", "zk-yingyu-full", "expiry", "2027-02-15", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
@@ -1623,10 +1635,10 @@ public class CourseApiController
     private static boolean ensureGaokaoSupplementCourses()
     {
         boolean changed = false;
-        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-full", "gaokao", "full", "高考生物2026", "/static/courses/gk-huaxue.jpg", 296, 21));
-        changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史2026", "/static/courses/gk-dili-full.jpg", 284, 22));
-        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治2026", "/static/courses/gk-dili-full.jpg", 271, 23));
-        changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理2026", "/static/courses/gk-dili-full.jpg", 302, 24));
+        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-full", "gaokao", "full", "高考生物", "/static/courses/gk-huaxue.jpg", 296, 21));
+        changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史", "/static/courses/gk-dili-full.jpg", 284, 22));
+        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治", "/static/courses/gk-dili-full.jpg", 271, 23));
+        changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理", "/static/courses/gk-dili-full.jpg", 302, 24));
         return changed;
     }
 
@@ -1686,16 +1698,16 @@ public class CourseApiController
     private static boolean ensureCoreTrialCourses()
     {
         boolean changed = false;
-        changed |= addCourseIfMissing(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文2026", "/static/courses/zk-yuwen.jpg", 1086, 1));
-        changed |= addCourseIfMissing(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学2026", "/static/courses/zk-shuxue.jpg", 1456, 2));
-        changed |= addCourseIfMissing(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语2026", "/static/courses/zk-yingyu.jpg", 1289, 3));
-        changed |= addCourseIfMissing(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理2026", "/static/courses/zk-wuli.jpg", 1176, 4));
-        changed |= addCourseIfMissing(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学2026", "/static/courses/zk-huaxue.jpg", 1237, 5));
-        changed |= addCourseIfMissing(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文2026", "/static/courses/gk-yuwen.jpg", 1078, 6));
+        changed |= addCourseIfMissing(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文", "/static/courses/zk-yuwen.jpg", 1086, 1));
+        changed |= addCourseIfMissing(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学", "/static/courses/zk-shuxue.jpg", 1456, 2));
+        changed |= addCourseIfMissing(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语", "/static/courses/zk-yingyu.jpg", 1289, 3));
+        changed |= addCourseIfMissing(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理", "/static/courses/zk-wuli.jpg", 1176, 4));
+        changed |= addCourseIfMissing(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学", "/static/courses/zk-huaxue.jpg", 1237, 5));
+        changed |= addCourseIfMissing(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文", "/static/courses/gk-yuwen.jpg", 1078, 6));
         changed |= addCourseIfMissing(mathTrial());
-        changed |= addCourseIfMissing(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语2026", "/static/courses/gk-yingyu.jpg", 1360, 8));
-        changed |= addCourseIfMissing(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理2026", "/static/courses/gk-wuli.jpg", 1121, 9));
-        changed |= addCourseIfMissing(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学2026", "/static/courses/gk-huaxue.jpg", 980, 10));
+        changed |= addCourseIfMissing(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语", "/static/courses/gk-yingyu.jpg", 1360, 8));
+        changed |= addCourseIfMissing(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理", "/static/courses/gk-wuli.jpg", 1121, 9));
+        changed |= addCourseIfMissing(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学", "/static/courses/gk-huaxue.jpg", 980, 10));
         return changed;
     }
 
@@ -1731,9 +1743,42 @@ public class CourseApiController
 
     private static void initDocs()
     {
-        docs.add(map("id", "doc-1", "courseId", "gk-math-full", "title", "高考数学集合逻辑讲义.pdf", "fileUrl", "#", "fileType", "PDF", "size", "1.2MB", "visible", true));
-        docs.add(map("id", "doc-2", "courseId", "gk-math-full", "title", "导数极值专题学案.pdf", "fileUrl", "#", "fileType", "PDF", "size", "2.4MB", "visible", true));
-        docs.add(map("id", "doc-3", "courseId", "zk-yingyu-full", "title", "中考英语核心词汇表.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "visible", true));
+        ensureCourseDocDefaults();
+    }
+
+    private static boolean ensureCourseDocDefaults()
+    {
+        boolean changed = false;
+        changed |= addDocIfMissing(map("id", "doc-1", "courseId", "gk-math-full", "category", "lecture", "title", "高考数学集合逻辑讲义.pdf", "fileUrl", "#", "fileType", "PDF", "size", "1.2MB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
+        changed |= addDocIfMissing(map("id", "doc-2", "courseId", "gk-math-full", "category", "lecture", "title", "导数极值专题学案.pdf", "fileUrl", "#", "fileType", "PDF", "size", "2.4MB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
+        changed |= addDocIfMissing(map("id", "doc-3", "courseId", "zk-yingyu-full", "category", "lecture", "title", "中考英语核心词汇表.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
+        changed |= addDocIfMissing(map("id", "paper-1", "courseId", "gk-math-full", "category", "paper", "title", "高考数学集合逻辑测试卷.pdf", "fileUrl", "#", "fileType", "PDF", "size", "1.2MB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
+        changed |= addDocIfMissing(map("id", "paper-2", "courseId", "gk-math-full", "category", "paper", "title", "导数极值专题测试卷.pdf", "fileUrl", "#", "fileType", "PDF", "size", "2.4MB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
+        changed |= addDocIfMissing(map("id", "paper-3", "courseId", "zk-yingyu-full", "category", "paper", "title", "中考英语核心词汇测试卷.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
+        for (Map<String, Object> doc : docs)
+        {
+            if (str(doc.get("uploadTime")).length() == 0)
+            {
+                doc.put("uploadTime", "paper".equals(doc.get("category")) ? "2026-05-26T10:15:00" : "2026-05-26T10:11:00");
+                changed = true;
+            }
+            if (str(doc.get("category")).length() == 0)
+            {
+                doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static boolean addDocIfMissing(Map<String, Object> doc)
+    {
+        if (findById(docs, str(doc.get("id"))) != null)
+        {
+            return false;
+        }
+        docs.add(doc);
+        return true;
     }
 
     private static void initQuestions()
@@ -1771,12 +1816,13 @@ public class CourseApiController
 
     private static Map<String, Object> mathTrial()
     {
-        Map<String, Object> course = simpleCourse("gk-math-trial", "gaokao", "trial", "高考数学2026", "/static/courses/gk-shuxue.jpg", 1450, 7);
+        Map<String, Object> course = simpleCourse("gk-math-trial", "gaokao", "trial", "高考数学", "/static/courses/gk-shuxue.jpg", 1450, 7);
         course.put("subject", "gaokao-math");
         course.put("title", "高考数学");
-        course.put("courseName", "《高考数学2026》试听课");
-        course.put("introduction", "《高考数学2026》试听课");
+        course.put("courseName", "《高考数学》试听课");
+        course.put("introduction", "《高考数学》试听课");
         course.put("detailCover", "/static/courses/gk-shuxue-trial-detail.jpg");
+        course.put("updatedAt", "2026-05-26T10:11:00");
         course.put("totalLessons", 6);
         course.put("totalDuration", "02小时13分");
         course.put("practiceDuration", "01小时11分");
@@ -1795,12 +1841,13 @@ public class CourseApiController
 
     private static Map<String, Object> mathFull()
     {
-        Map<String, Object> course = simpleCourse("gk-math-full", "gaokao", "full", "高考数学2026", "/static/courses/gk-shuxue-full.jpg", 117, 17);
+        Map<String, Object> course = simpleCourse("gk-math-full", "gaokao", "full", "高考数学", "/static/courses/gk-shuxue-full.jpg", 117, 17);
         course.put("subject", "gaokao-math");
         course.put("title", "高考数学");
-        course.put("courseName", "《高考数学2026》");
-        course.put("introduction", "《高考数学》2026");
+        course.put("courseName", "《高考数学》");
+        course.put("introduction", "《高考数学》");
         course.put("detailCover", "/static/courses/gk-shuxue-full-detail.jpg");
+        course.put("updatedAt", "2026-05-26T10:15:00");
         course.put("totalLessons", 76);
         course.put("totalDuration", "04小时53分");
         course.put("practiceDuration", "22小时00分");
@@ -1832,17 +1879,19 @@ public class CourseApiController
 
     private static Map<String, Object> simpleCourse(String id, String stage, String kind, String full, String cover, int studyCount, int sort)
     {
+        String displayFull = stripCourseYear(full);
         return map(
             "id", id,
             "stage", stage,
             "kind", kind,
             "subject", id.replaceAll("-(trial|full)$", ""),
-            "full", full,
-            "title", full.replace("2026", ""),
-            "courseName", "trial".equals(kind) ? "《" + full + "》试听课" : "《" + full.replace("2026", "") + "》2026",
-            "introduction", "trial".equals(kind) ? "《" + full + "》试听课" : "《" + full.replace("2026", "") + "》2026",
+            "full", displayFull,
+            "title", displayFull,
+            "courseName", "trial".equals(kind) ? "《" + displayFull + "》试听课" : "《" + displayFull + "》",
+            "introduction", "trial".equals(kind) ? "《" + displayFull + "》试听课" : "《" + displayFull + "》",
             "cover", cover,
             "detailCover", cover,
+            "updatedAt", "trial".equals(kind) ? "2026-05-26T10:11:00" : "2026-05-26T10:15:00",
             "openMode", "trial".equals(kind) ? "trial" : "card",
             "openText", "trial".equals(kind) ? "试听免费" : "激活课程",
             "studyCount", studyCount,
@@ -1934,10 +1983,10 @@ public class CourseApiController
             "stage", course.get("stage"),
             "kind", course.get("kind"),
             "subject", course.get("subject"),
-            "full", course.get("full"),
-            "title", course.get("title"),
+            "full", stripCourseYear(course.get("full")),
+            "title", stripCourseYear(course.get("title")),
             "suffix", "trial".equals(course.get("kind")) ? "试听课" : "",
-            "sub", course.get("courseName"),
+            "sub", stripCourseYear(course.get("courseName")),
             "openMode", course.get("openMode"),
             "openText", course.get("openText"),
             "cover", course.get("cover"),
@@ -1951,6 +2000,10 @@ public class CourseApiController
     private static Map<String, Object> courseForApp(Map<String, Object> course, Map<String, Object> user)
     {
         Map<String, Object> result = new LinkedHashMap<>(course);
+        result.put("full", stripCourseYear(result.get("full")));
+        result.put("title", stripCourseYear(result.get("title")));
+        result.put("courseName", stripCourseYear(result.get("courseName")));
+        result.put("introduction", stripCourseYear(result.get("introduction")));
         applyComputedCourseStats(result, user);
         return result;
     }
@@ -2879,7 +2932,7 @@ public class CourseApiController
             return "";
         }
         Map<String, Object> course = findCourse(id);
-        return course == null ? id : str(course.get("courseName"));
+        return course == null ? id : stripCourseYear(course.get("courseName"));
     }
 
     private static String resolveSubjectTitle(Object courseId)
@@ -2895,7 +2948,7 @@ public class CourseApiController
             return "高考数学";
         }
         String title = str(course.get("title"));
-        return title.length() == 0 ? str(course.get("courseName")) : title;
+        return title.length() == 0 ? stripCourseYear(course.get("courseName")) : title;
     }
 
     private static String displayCourseTitle(Map<String, Object> attempt)
@@ -3191,8 +3244,8 @@ public class CourseApiController
             openCourses.add(map(
                 "id", courseId,
                 "courseId", courseId,
-                "title", course == null ? courseId : str(course.get("title")).replace("2026", ""),
-                "courseName", course == null ? courseId : course.get("courseName")
+            "title", course == null ? courseId : stripCourseYear(course.get("title")),
+            "courseName", course == null ? courseId : stripCourseYear(course.get("courseName"))
             ));
         }
         Map<String, Object> user = findById(users, userId);
@@ -3497,7 +3550,7 @@ public class CourseApiController
         }
         return map(
             "courseId", courseId,
-            "courseTitle", course == null ? str(body.get("courseTitle")) : str(course.get("courseName")),
+            "courseTitle", course == null ? stripCourseYear(body.get("courseTitle")) : stripCourseYear(course.get("courseName")),
             "subjectTitle", course == null ? str(body.get("courseTitle")) : str(course.get("title")),
             "chapterTitle", chapterTitle.length() == 0 ? "未归类章节" : chapterTitle
         );
@@ -3562,7 +3615,7 @@ public class CourseApiController
             "userId", user == null ? null : user.get("id"),
             "userName", user == null ? "" : user.get("name"),
             "courseId", courseId,
-            "courseTitle", course.get("courseName"),
+            "courseTitle", stripCourseYear(course.get("courseName")),
             "status", "activated",
             "amount", "0.00",
             "cardCode", cardCode,
@@ -3618,7 +3671,7 @@ public class CourseApiController
             "id", "card-" + code,
             "code", code,
             "courseId", courseId,
-            "courseTitle", course == null ? courseId : course.get("courseName"),
+            "courseTitle", course == null ? courseId : stripCourseYear(course.get("courseName")),
             "cardType", normalizeCardType(cardType),
             "cardTypeText", cardTypeText(cardType),
             "durationText", cardDurationText(cardType),
@@ -3735,7 +3788,7 @@ public class CourseApiController
             if ("courseId".equals(key))
             {
                 Map<String, Object> course = findCourse(str(source.get(key)));
-                target.put("courseTitle", course == null ? source.get(key) : course.get("courseName"));
+                target.put("courseTitle", course == null ? stripCourseYear(source.get(key)) : stripCourseYear(course.get("courseName")));
             }
         }
     }
@@ -4067,6 +4120,15 @@ public class CourseApiController
     private static String str(Object value)
     {
         return value == null ? "" : String.valueOf(value);
+    }
+
+    private static String stripCourseYear(Object value)
+    {
+        return str(value)
+            .replaceAll("((中考|高考)(语文|数学|英语|物理|化学|生物|历史|政治|地理))20\\d{2}", "$1")
+            .replaceAll("(《[^》]*?)20\\d{2}(》)", "$1$2")
+            .replaceAll("(《[^》]+》)\\s*20\\d{2}", "$1")
+            .trim();
     }
 
     private static int intValue(Object value)
