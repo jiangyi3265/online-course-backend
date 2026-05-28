@@ -390,13 +390,23 @@ public class CourseApiController
     }
 
     @GetMapping("/app/my/docs")
-    public AjaxResult myDocs(@RequestParam(required = false, defaultValue = "") String kw)
+    public AjaxResult myDocs(@RequestParam(required = false, defaultValue = "") String kw,
+                             @RequestParam(required = false, defaultValue = "") String courseId)
     {
         String text = kw.trim().toLowerCase();
+        String expectedCourseId = str(courseId).trim();
+        if (expectedCourseId.length() > 0)
+        {
+            expectedCourseId = scopedCourseId(expectedCourseId);
+        }
         List<Map<String, Object>> list = new ArrayList<>();
         for (Map<String, Object> doc : docs)
         {
             if (Boolean.FALSE.equals(doc.get("visible")))
+            {
+                continue;
+            }
+            if (expectedCourseId.length() > 0 && !expectedCourseId.equals(scopedCourseId(doc.get("courseId"))))
             {
                 continue;
             }
@@ -860,18 +870,23 @@ public class CourseApiController
         {
             return AjaxResult.success(Collections.emptyList());
         }
-        List<Map<String, Object>> result = new ArrayList<>();
+        Map<String, Map<String, Object>> result = new LinkedHashMap<>();
         for (Map<String, Object> binding : studentBindings)
         {
             if (str(user.get("id")).equals(str(binding.get("ownerUserId"))))
             {
-                Map<String, Object> student = findById(users, str(binding.get("studentUserId")));
+                String studentUserId = str(binding.get("studentUserId"));
+                Map<String, Object> student = findById(users, studentUserId);
                 if (student != null)
                 {
                     Map<String, Object> item = publicUser(student);
-                    item.put("learning", studentLearningSnapshot(str(student.get("id"))));
-                    item.putAll(studentCourseSummary(str(student.get("id"))));
-                    result.add(item);
+                    item.put("learning", studentLearningSnapshot(studentUserId));
+                    item.putAll(studentCourseSummary(studentUserId));
+                    item.put("bindingId", binding.get("id"));
+                    item.put("bindingCreatedAt", binding.get("createdAt"));
+                    item.put("bindingSource", "账号绑定");
+                    item.put("canUnbind", true);
+                    result.put(studentUserId, item);
                 }
             }
         }
@@ -881,13 +896,22 @@ public class CourseApiController
             {
                 if (str(user.get("id")).equals(str(order.get("agencyUserId"))) || str(user.get("id")).equals(str(order.get("ownerUserId"))))
                 {
-                    Map<String, Object> item = map("id", order.get("userId"), "name", order.get("studentName"), "phone", "", "grade", order.get("grade"), "region", order.get("region"), "learning", studentLearningSnapshot(str(order.get("userId"))));
-                    item.putAll(studentCourseSummary(str(order.get("userId"))));
-                    result.add(item);
+                    String studentUserId = str(order.get("userId"));
+                    if (studentUserId.length() == 0 || result.containsKey(studentUserId))
+                    {
+                        continue;
+                    }
+                    Map<String, Object> item = map("id", studentUserId, "name", order.get("studentName"), "phone", "", "grade", order.get("grade"), "region", order.get("region"), "learning", studentLearningSnapshot(studentUserId));
+                    item.putAll(studentCourseSummary(studentUserId));
+                    item.put("bindingId", "");
+                    item.put("bindingCreatedAt", order.get("createdAt"));
+                    item.put("bindingSource", "授权记录");
+                    item.put("canUnbind", false);
+                    result.put(studentUserId, item);
                 }
             }
         }
-        return AjaxResult.success(result);
+        return AjaxResult.success(new ArrayList<>(result.values()));
     }
 
     @PostMapping("/app/my/students/bind")
@@ -1193,6 +1217,15 @@ public class CourseApiController
     @GetMapping("/admin/docs")
     public AjaxResult adminDocs()
     {
+        boolean changed = false;
+        for (Map<String, Object> doc : docs)
+        {
+            changed |= ensureDocDefaults(doc);
+        }
+        if (changed)
+        {
+            persistData();
+        }
         return AjaxResult.success(docs);
     }
 
@@ -1203,14 +1236,11 @@ public class CourseApiController
         {
             doc.put("id", "doc-" + System.currentTimeMillis());
         }
-        if (str(doc.get("category")).length() == 0)
-        {
-            doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
-        }
         if (str(doc.get("uploadTime")).length() == 0)
         {
             doc.put("uploadTime", now());
         }
+        ensureDocDefaults(doc);
         docs.add(doc);
         persistData();
         return AjaxResult.success(doc);
@@ -1226,6 +1256,7 @@ public class CourseApiController
         }
         doc.putAll(body);
         doc.put("id", id);
+        ensureDocDefaults(doc);
         persistData();
         return AjaxResult.success(doc);
     }
@@ -1764,16 +1795,39 @@ public class CourseApiController
         changed |= addDocIfMissing(map("id", "paper-3", "courseId", "zk-yingyu-full", "category", "paper", "title", "中考英语核心词汇测试卷.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
         for (Map<String, Object> doc : docs)
         {
-            if (str(doc.get("uploadTime")).length() == 0)
-            {
-                doc.put("uploadTime", "paper".equals(doc.get("category")) ? "2026-05-26T10:15:00" : "2026-05-26T10:11:00");
-                changed = true;
-            }
-            if (str(doc.get("category")).length() == 0)
-            {
-                doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
-                changed = true;
-            }
+            changed |= ensureDocDefaults(doc);
+        }
+        return changed;
+    }
+
+    private static boolean ensureDocDefaults(Map<String, Object> doc)
+    {
+        boolean changed = false;
+        String courseId = scopedCourseId(doc.get("courseId"));
+        if (!courseId.equals(str(doc.get("courseId"))))
+        {
+            doc.put("courseId", courseId);
+            changed = true;
+        }
+        if (str(doc.get("courseTitle")).length() == 0 || !str(doc.get("courseTitle")).equals(resolveCourseTitle(courseId)))
+        {
+            doc.put("courseTitle", resolveCourseTitle(courseId));
+            changed = true;
+        }
+        if (str(doc.get("category")).length() == 0)
+        {
+            doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
+            changed = true;
+        }
+        if (str(doc.get("uploadTime")).length() == 0)
+        {
+            doc.put("uploadTime", "paper".equals(doc.get("category")) ? "2026-05-26T10:15:00" : "2026-05-26T10:11:00");
+            changed = true;
+        }
+        if (!doc.containsKey("visible"))
+        {
+            doc.put("visible", true);
+            changed = true;
         }
         return changed;
     }
