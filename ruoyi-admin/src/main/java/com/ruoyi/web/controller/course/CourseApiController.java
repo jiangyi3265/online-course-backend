@@ -2172,6 +2172,8 @@ public class CourseApiController
         {
             type = "practice";
         }
+        String courseId = scopedCourseId(payload.get("courseId"));
+        payload.put("courseId", courseId);
         Map<String, Object> answers = mapValue(payload.get("answers"));
         List<String> questionIds = stringList(payload.get("questionIds"));
         List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
@@ -2185,6 +2187,11 @@ public class CourseApiController
             boolean ok = selected == intValue(q.get("answer"));
             String sourceWrongId = index < sourceWrongIds.size() ? sourceWrongIds.get(index) : "";
             Map<String, Object> sourceWrong = sourceWrongId.length() == 0 ? null : findById(wrongQuestions, sourceWrongId);
+            if (sourceWrong != null && (!sameUser(sourceWrong, user) || !courseId.equals(scopedCourseId(sourceWrong.get("courseId")))))
+            {
+                sourceWrong = null;
+                sourceWrongId = "";
+            }
             String originType = sourceWrong == null ? str(payload.get("originType")) : str(sourceWrong.get("type"));
             if (ok)
             {
@@ -2226,7 +2233,7 @@ public class CourseApiController
             detail.put("videoAnalysisUrl", analysisVideoUrl(q));
             index++;
         }
-        updateWrongRetryStats(type, sourceWrongIds, details, user);
+        updateWrongRetryStats(type, sourceWrongIds, details, user, courseId);
         Map<String, Object> attempt = map(
             "id", "attempt-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
@@ -2295,9 +2302,11 @@ public class CourseApiController
         {
             wrong.put("updatedAt", now());
         }
+        ensureWrongCourseMeta(wrong);
+        String courseId = scopedCourseId(wrong.get("courseId"));
         String questionKey = ensureWrongQuestionKey(wrong);
         ensureWrongSourceTypes(wrong);
-        Map<String, Object> existing = findWrongByQuestion(user, questionKey);
+        Map<String, Object> existing = findWrongByQuestion(user, courseId, questionKey);
         if (existing == null)
         {
             wrong.put("mastered", false);
@@ -2310,11 +2319,14 @@ public class CourseApiController
         return existing;
     }
 
-    private static Map<String, Object> findWrongByQuestion(Map<String, Object> user, String questionKey)
+    private static Map<String, Object> findWrongByQuestion(Map<String, Object> user, String courseId, String questionKey)
     {
+        String expectedCourseId = scopedCourseId(courseId);
         for (Map<String, Object> wrong : wrongQuestions)
         {
-            if (sameUser(wrong, user) && questionKey.equals(ensureWrongQuestionKey(wrong)))
+            if (sameUser(wrong, user)
+                && expectedCourseId.equals(scopedCourseId(wrong.get("courseId")))
+                && questionKey.equals(ensureWrongQuestionKey(wrong)))
             {
                 return wrong;
             }
@@ -2332,8 +2344,9 @@ public class CourseApiController
             boolean hadQuestionKey = str(wrong.get("questionKey")).trim().length() > 0;
             boolean hadSourceTypes = wrong.get("sourceTypes") instanceof List;
             boolean hadRepeatWrongCount = intValue(wrong.get("repeatWrongCount")) > 0;
+            boolean courseChanged = ensureWrongCourseMeta(wrong);
             String key = wrongRecordKey(wrong);
-            if (!hadQuestionKey || !hadSourceTypes || !hadRepeatWrongCount)
+            if (!hadQuestionKey || !hadSourceTypes || !hadRepeatWrongCount || courseChanged)
             {
                 changed = true;
             }
@@ -2362,7 +2375,7 @@ public class CourseApiController
 
     private static String wrongRecordKey(Map<String, Object> wrong)
     {
-        return str(wrong.get("userId")) + ":" + ensureWrongQuestionKey(wrong);
+        return str(wrong.get("userId")) + ":" + scopedCourseId(wrong.get("courseId")) + ":" + ensureWrongQuestionKey(wrong);
     }
 
     private static String ensureWrongQuestionKey(Map<String, Object> wrong)
@@ -2450,6 +2463,7 @@ public class CourseApiController
             }
         }
         ensureWrongQuestionKey(target);
+        ensureWrongCourseMeta(target);
     }
 
     private static void mergeWrongSourceTypes(Map<String, Object> target, Map<String, Object> source)
@@ -2858,16 +2872,17 @@ public class CourseApiController
         );
     }
 
-    private static void updateWrongRetryStats(String type, List<String> sourceWrongIds, List<Map<String, Object>> details, Map<String, Object> user)
+    private static void updateWrongRetryStats(String type, List<String> sourceWrongIds, List<Map<String, Object>> details, Map<String, Object> user, String courseId)
     {
         if (!isWrongRetryType(type))
         {
             return;
         }
+        String expectedCourseId = scopedCourseId(courseId);
         for (int i = 0; i < sourceWrongIds.size(); i++)
         {
             Map<String, Object> wrong = findById(wrongQuestions, sourceWrongIds.get(i));
-            if (wrong == null || !sameUser(wrong, user))
+            if (wrong == null || !sameUser(wrong, user) || !expectedCourseId.equals(scopedCourseId(wrong.get("courseId"))))
             {
                 continue;
             }
@@ -3996,21 +4011,50 @@ public class CourseApiController
 
     private static List<Map<String, Object>> filterByCourse(List<Map<String, Object>> list, String courseId)
     {
-        String expected = str(courseId);
+        String expected = str(courseId).trim();
         if (expected.length() == 0)
         {
             return list;
         }
+        expected = scopedCourseId(expected);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> item : list)
         {
-            String itemCourseId = str(item.get("courseId"));
-            if (itemCourseId.length() == 0 || expected.equals(itemCourseId))
+            String itemCourseId = scopedCourseId(item.get("courseId"));
+            if (expected.equals(itemCourseId))
             {
                 result.add(item);
             }
         }
         return result;
+    }
+
+    private static String scopedCourseId(Object courseId)
+    {
+        String value = str(courseId).trim();
+        return value.length() == 0 ? "gk-math-full" : value;
+    }
+
+    private static boolean ensureWrongCourseMeta(Map<String, Object> wrong)
+    {
+        boolean changed = false;
+        String courseId = scopedCourseId(wrong.get("courseId"));
+        if (!courseId.equals(str(wrong.get("courseId"))))
+        {
+            wrong.put("courseId", courseId);
+            changed = true;
+        }
+        if (str(wrong.get("courseTitle")).length() == 0)
+        {
+            wrong.put("courseTitle", resolveCourseTitle(courseId));
+            changed = true;
+        }
+        if (str(wrong.get("subjectTitle")).length() == 0)
+        {
+            wrong.put("subjectTitle", resolveSubjectTitle(courseId));
+            changed = true;
+        }
+        return changed;
     }
 
     private static boolean sameUser(Map<String, Object> item, Map<String, Object> user)
