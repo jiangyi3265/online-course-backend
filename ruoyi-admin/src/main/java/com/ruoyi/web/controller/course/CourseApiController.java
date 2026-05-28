@@ -890,6 +890,25 @@ public class CourseApiController
                 }
             }
         }
+        for (Map<String, Object> student : users)
+        {
+            String studentUserId = str(student.get("id"));
+            if (studentUserId.length() == 0 || result.containsKey(studentUserId))
+            {
+                continue;
+            }
+            if (str(user.get("id")).equals(str(student.get("referrerUserId"))))
+            {
+                Map<String, Object> item = publicUser(student);
+                item.put("learning", studentLearningSnapshot(studentUserId));
+                item.putAll(studentCourseSummary(studentUserId));
+                item.put("bindingId", "referrer-" + studentUserId);
+                item.put("bindingCreatedAt", student.get("referrerBoundAt"));
+                item.put("bindingSource", "推荐绑定");
+                item.put("canUnbind", true);
+                result.put(studentUserId, item);
+            }
+        }
         if ("agency_admin".equals(user.get("role")) || "admin".equals(user.get("role")))
         {
             for (Map<String, Object> order : orders)
@@ -967,6 +986,13 @@ public class CourseApiController
         boolean removed = studentBindings.removeIf(binding ->
             owner.get("id").equals(binding.get("ownerUserId")) && studentUserId.equals(str(binding.get("studentUserId")))
         );
+        Map<String, Object> student = findById(users, studentUserId);
+        if (student != null && str(owner.get("id")).equals(str(student.get("referrerUserId"))))
+        {
+            student.remove("referrerUserId");
+            student.remove("referrerBoundAt");
+            removed = true;
+        }
         if (removed)
         {
             persistData();
@@ -3216,6 +3242,11 @@ public class CourseApiController
             {
                 return true;
             }
+        }
+        Map<String, Object> student = findById(users, studentUserId);
+        if (student != null && str(requester.get("id")).equals(str(student.get("referrerUserId"))))
+        {
+            return true;
         }
         return false;
     }
