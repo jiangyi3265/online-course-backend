@@ -713,12 +713,13 @@ public class CourseApiController
     }
 
     @PostMapping("/app/wrongbook/mastered")
-    public AjaxResult markWrong(@RequestBody Map<String, Object> body)
+    public AjaxResult markWrong(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
+        Map<String, Object> user = currentUser(request);
         String id = str(body.get("id"));
         for (Map<String, Object> wrong : wrongQuestions)
         {
-            if (id.equals(wrong.get("id")))
+            if (id.equals(wrong.get("id")) && sameUser(wrong, user))
             {
                 wrong.put("mastered", true);
                 wrong.put("updatedAt", now());
