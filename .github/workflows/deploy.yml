@@ -57,14 +57,13 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           : > ~/.ssh/known_hosts
 
-      - name: Upload source archive
+      - name: Upload backend package
         shell: bash
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
-          SOURCE_ARCHIVE="wangkejava-source.tar.gz"
           PACKAGE_PATH="ruoyi-admin/target/$APP_NAME"
 
           retry() {
@@ -80,19 +79,12 @@ jobs:
             done
           }
 
-          git archive --format=tar.gz --output="$SOURCE_ARCHIVE" "$GITHUB_SHA"
-          test -s "$SOURCE_ARCHIVE"
-          du -h "$SOURCE_ARCHIVE"
           echo "Creating remote release directory..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/source' && mkdir -p '$RELEASE_DIR/source' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
-          echo "Uploading backend source archive..."
-          retry 4 timeout 3m scp $SCP_OPTS "$SOURCE_ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$SOURCE_ARCHIVE"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
           if [ -f sql/ry_20250522.sql ]; then
             echo "Uploading database bootstrap SQL..."
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
-          echo "Extracting backend source archive..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "tar -xzf '$RELEASE_DIR/$SOURCE_ARCHIVE' -C '$RELEASE_DIR/source'"
           echo "Uploading backend package..."
           retry 4 timeout 3m scp $SCP_OPTS "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
           retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
