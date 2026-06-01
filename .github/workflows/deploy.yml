@@ -166,43 +166,75 @@ jobs:
             done
           }
 
-          upload_part() {
-            local src="$1"
-            local dest="$2"
-            timeout 3m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$dest'" < "$src"
+          upload_source_archive() {
+            timeout 4m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$RELEASE_DIR/backend-source.tgz'" < backend-source.tgz
           }
 
           echo "Creating remote release directory..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/parts' && mkdir -p '$RELEASE_DIR/parts' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/source' && mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
           if [ -f sql/ry_20250522.sql ]; then
             echo "Uploading database bootstrap SQL..."
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
 
-          echo "Splitting backend package for upload..."
-          PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
-          PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
-          rm -rf package-parts
-          mkdir -p package-parts
-          split -b 2M -d -a 4 "$PACKAGE_PATH" package-parts/$APP_NAME.part.
+          echo "Creating source archive..."
+          git archive --format=tar.gz --output backend-source.tgz "$GITHUB_SHA"
+          SOURCE_SHA="$(sha256sum backend-source.tgz | awk '{print $1}')"
+          SOURCE_SIZE="$(stat -c%s backend-source.tgz)"
 
-          echo "Uploading backend package parts..."
-          for part in package-parts/$APP_NAME.part.*; do
-            echo "Uploading $(basename "$part")..."
-            retry 4 upload_part "$part" "$RELEASE_DIR/parts/$(basename "$part")"
-          done
+          echo "Uploading source archive..."
+          retry 5 upload_source_archive
 
-          echo "Assembling backend package on server..."
-          timeout 2m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          echo "Building backend package on server..."
+          timeout 35m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' SOURCE_SHA='$SOURCE_SHA' SOURCE_SIZE='$SOURCE_SIZE' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
-          cat "$RELEASE_DIR"/parts/"$APP_NAME".part.* > "$RELEASE_DIR/$APP_NAME"
-          ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/$APP_NAME")"
-          ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/$APP_NAME" | awk '{print $1}')"
-          if [ "$ACTUAL_SIZE" != "$PACKAGE_SIZE" ] || [ "$ACTUAL_SHA" != "$PACKAGE_SHA" ]; then
-            echo "package verification failed: size=$ACTUAL_SIZE sha=$ACTUAL_SHA"
+          ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/backend-source.tgz")"
+          ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/backend-source.tgz" | awk '{print $1}')"
+          if [ "$ACTUAL_SIZE" != "$SOURCE_SIZE" ] || [ "$ACTUAL_SHA" != "$SOURCE_SHA" ]; then
+            echo "source verification failed: size=$ACTUAL_SIZE sha=$ACTUAL_SHA"
             exit 1
           fi
-          cp "$RELEASE_DIR/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
+
+          if [ -x "$JAVA_HOME/bin/java" ]; then
+            export JAVA_HOME="$JAVA_HOME"
+            export PATH="$JAVA_HOME/bin:$PATH"
+          fi
+
+          if ! command -v mvn >/dev/null 2>&1; then
+            if command -v yum >/dev/null 2>&1; then
+              yum install -y maven
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y maven
+            else
+              echo "maven not found and no supported package manager available"
+              exit 1
+            fi
+          fi
+
+          mkdir -p "$HOME/.m2"
+          cat > "$HOME/.m2/settings.xml" <<'MAVEN_SETTINGS'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <mirrors>
+              <mirror>
+                <id>aliyunmaven</id>
+                <mirrorOf>*</mirrorOf>
+                <name>Aliyun Maven</name>
+                <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          MAVEN_SETTINGS
+
+          rm -rf "$RELEASE_DIR/source"
+          mkdir -p "$RELEASE_DIR/source"
+          tar -xzf "$RELEASE_DIR/backend-source.tgz" -C "$RELEASE_DIR/source"
+          cd "$RELEASE_DIR/source"
+          MAVEN_OPTS="${MAVEN_OPTS:-} -Xmx768m" mvn -B -pl ruoyi-admin -am package -DskipTests
+          test -f "ruoyi-admin/target/$APP_NAME"
+          cp "ruoyi-admin/target/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
           mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
           REMOTE
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
