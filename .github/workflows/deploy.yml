@@ -167,14 +167,38 @@ jobs:
           }
 
           echo "Creating remote release directory..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/parts' && mkdir -p '$RELEASE_DIR/parts' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
           if [ -f sql/ry_20250522.sql ]; then
             echo "Uploading database bootstrap SQL..."
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
-          echo "Uploading backend package..."
-          retry 3 timeout 30m scp $SCP_OPTS "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+
+          echo "Splitting backend package for upload..."
+          PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
+          PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
+          rm -rf package-parts
+          mkdir -p package-parts
+          split -b 8M -d -a 4 "$PACKAGE_PATH" package-parts/$APP_NAME.part.
+
+          echo "Uploading backend package parts..."
+          for part in package-parts/$APP_NAME.part.*; do
+            echo "Uploading $(basename "$part")..."
+            retry 5 timeout 4m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/parts/$(basename "$part")"
+          done
+
+          echo "Assembling backend package on server..."
+          timeout 2m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cat "$RELEASE_DIR"/parts/"$APP_NAME".part.* > "$RELEASE_DIR/$APP_NAME"
+          ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/$APP_NAME")"
+          ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/$APP_NAME" | awk '{print $1}')"
+          if [ "$ACTUAL_SIZE" != "$PACKAGE_SIZE" ] || [ "$ACTUAL_SHA" != "$PACKAGE_SHA" ]; then
+            echo "package verification failed: size=$ACTUAL_SIZE sha=$ACTUAL_SHA"
+            exit 1
+          fi
+          cp "$RELEASE_DIR/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
+          mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
+          REMOTE
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
 
       - name: Build release on server
