@@ -166,6 +166,12 @@ jobs:
             done
           }
 
+          upload_part() {
+            local src="$1"
+            local dest="$2"
+            timeout 3m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$dest'" < "$src"
+          }
+
           echo "Creating remote release directory..."
           retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/parts' && mkdir -p '$RELEASE_DIR/parts' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
           if [ -f sql/ry_20250522.sql ]; then
@@ -183,7 +189,7 @@ jobs:
           echo "Uploading backend package parts..."
           for part in package-parts/$APP_NAME.part.*; do
             echo "Uploading $(basename "$part")..."
-            retry 4 timeout 3m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/parts/$(basename "$part")"
+            retry 4 upload_part "$part" "$RELEASE_DIR/parts/$(basename "$part")"
           done
 
           echo "Assembling backend package on server..."
