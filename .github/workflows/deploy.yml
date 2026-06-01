@@ -423,20 +423,19 @@ jobs:
           fi
 
           for i in $(seq 1 60); do
-            if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
-              if command -v systemctl >/dev/null 2>&1 && systemctl is-failed --quiet "$SERVICE_NAME.service"; then
-                systemctl status "$SERVICE_NAME.service" --no-pager || true
-              fi
-              echo "java process exited"
-              tail -n 120 "$LOG_FILE" || true
-              exit 1
-            fi
-
             HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP_PORT/" || true)"
             if [ "$HTTP_CODE" != "000" ]; then
               echo "service started with http code $HTTP_CODE"
               exit 0
             fi
+
+            if [ "$i" -gt 10 ] && command -v systemctl >/dev/null 2>&1 && systemctl is-failed --quiet "$SERVICE_NAME.service"; then
+              systemctl status "$SERVICE_NAME.service" --no-pager || true
+              echo "java service failed"
+              tail -n 120 "$LOG_FILE" || true
+              exit 1
+            fi
+
             sleep 2
           done
 
