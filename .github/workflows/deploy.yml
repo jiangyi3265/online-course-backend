@@ -178,12 +178,12 @@ jobs:
           PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
           rm -rf package-parts
           mkdir -p package-parts
-          split -b 8M -d -a 4 "$PACKAGE_PATH" package-parts/$APP_NAME.part.
+          split -b 2M -d -a 4 "$PACKAGE_PATH" package-parts/$APP_NAME.part.
 
           echo "Uploading backend package parts..."
           for part in package-parts/$APP_NAME.part.*; do
             echo "Uploading $(basename "$part")..."
-            retry 5 timeout 4m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/parts/$(basename "$part")"
+            retry 4 timeout 3m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/parts/$(basename "$part")"
           done
 
           echo "Assembling backend package on server..."
