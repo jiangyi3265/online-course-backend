@@ -146,17 +146,31 @@ jobs:
         run: |
           set -euo pipefail
           SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-          timeout 4m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' LEGACY_APP_NAME='$LEGACY_APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
+          timeout 6m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' LEGACY_APP_NAME='$LEGACY_APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
 
+          SERVICE_NAME="wangkejava"
           LOG_FILE="$APP_DIR/logs/${APP_NAME%.jar}.log"
+
+          mkdir -p "$APP_DIR/logs" "$APP_DIR/uploadPath"
+
+          cat > "$APP_DIR/run-$SERVICE_NAME.sh" <<'RUNNER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          APP_DIR="${APP_DIR:-/www/wwwroot/wangkejava}"
+          APP_NAME="${APP_NAME:-wangkejava.jar}"
+          APP_PORT="${APP_PORT:-8007}"
+          JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-konajdk}"
+          LOG_FILE="$APP_DIR/logs/${APP_NAME%.jar}.log"
+
           JAVA_BIN=""
           if [ -x "$JAVA_HOME/bin/java" ]; then
             JAVA_BIN="$JAVA_HOME/bin/java"
           elif command -v java >/dev/null 2>&1; then
             JAVA_BIN="$(command -v java)"
           else
-            echo "java runtime not found"
+            echo "java runtime not found" >> "$LOG_FILE"
             exit 1
           fi
 
@@ -183,6 +197,48 @@ jobs:
           }
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+          fi
+
+          cd "$APP_DIR"
+          exec "$JAVA_BIN" \
+            -Dname="$APP_NAME" \
+            -Duser.timezone=Asia/Shanghai \
+            -Xms512m \
+            -Xmx1024m \
+            -jar "$APP_DIR/$APP_NAME" \
+            --ruoyi.profile="$APP_DIR/uploadPath" \
+            --server.port="$APP_PORT" \
+            >> "$LOG_FILE" 2>&1
+          RUNNER
+          chmod +x "$APP_DIR/run-$SERVICE_NAME.sh"
+
+          cat > "/etc/systemd/system/$SERVICE_NAME.service" <<UNIT
+          [Unit]
+          Description=Wangke Java Service
+          After=network-online.target mysql.service mysqld.service redis.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=$APP_DIR
+          Environment=APP_DIR=$APP_DIR
+          Environment=APP_NAME=$APP_NAME
+          Environment=APP_PORT=$APP_PORT
+          Environment=JAVA_HOME=$JAVA_HOME
+          ExecStart=$APP_DIR/run-$SERVICE_NAME.sh
+          Restart=always
+          RestartSec=5
+          SuccessExitStatus=143
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+          fi
 
           for app in "$APP_NAME" "$LEGACY_APP_NAME"; do
             [ -n "$app" ] || continue
@@ -209,23 +265,19 @@ jobs:
             exit 1
           fi
 
-          cd "$APP_DIR"
-          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
-            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+          if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable "$SERVICE_NAME.service"
+            systemctl restart "$SERVICE_NAME.service"
+          else
+            nohup "$APP_DIR/run-$SERVICE_NAME.sh" >/dev/null 2>&1 &
           fi
 
-          nohup "$JAVA_BIN" \
-            -Dname="$APP_NAME" \
-            -Duser.timezone=Asia/Shanghai \
-            -Xms512m \
-            -Xmx1024m \
-            -jar "$APP_DIR/$APP_NAME" \
-            --ruoyi.profile="$APP_DIR/uploadPath" \
-            --server.port="$APP_PORT" \
-            > "$LOG_FILE" 2>&1 &
-
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+              if command -v systemctl >/dev/null 2>&1 && systemctl is-failed --quiet "$SERVICE_NAME.service"; then
+                systemctl status "$SERVICE_NAME.service" --no-pager || true
+              fi
               echo "java process exited"
               tail -n 120 "$LOG_FILE" || true
               exit 1
