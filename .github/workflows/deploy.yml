@@ -57,6 +57,93 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           : > ~/.ssh/known_hosts
 
+      - name: Recover existing backend before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          timeout 3m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' APP_PORT='$APP_PORT' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          if pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+            echo "backend process already running"
+            exit 0
+          fi
+
+          if [ ! -f "$APP_DIR/$APP_NAME" ]; then
+            echo "existing backend package not found, skip recovery"
+            exit 0
+          fi
+
+          mkdir -p "$APP_DIR/logs" "$APP_DIR/uploadPath"
+          LOG_FILE="$APP_DIR/logs/${APP_NAME%.jar}.log"
+          JAVA_BIN=""
+          if [ -x "$JAVA_HOME/bin/java" ]; then
+            JAVA_BIN="$JAVA_HOME/bin/java"
+          elif command -v java >/dev/null 2>&1; then
+            JAVA_BIN="$(command -v java)"
+          else
+            echo "java runtime not found"
+            exit 1
+          fi
+
+          get_mysql_root_password() {
+            python3 - <<'PY'
+          import os, re, subprocess, sys
+          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
+          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
+          if not os.path.exists(log):
+              sys.exit(1)
+          text = open(log, errors="ignore").read()
+          for match in re.finditer(pattern, text):
+              password = match.group(1).strip()
+              if not (3 <= len(password) <= 80):
+                  continue
+              env = os.environ.copy()
+              env["MYSQL_PWD"] = password
+              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if result.returncode == 0:
+                  print(password)
+                  sys.exit(0)
+          sys.exit(1)
+          PY
+          }
+
+          MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+          fi
+
+          cd "$APP_DIR"
+          nohup "$JAVA_BIN" \
+            -Dname="$APP_NAME" \
+            -Duser.timezone=Asia/Shanghai \
+            -Xms512m \
+            -Xmx1024m \
+            -jar "$APP_DIR/$APP_NAME" \
+            --ruoyi.profile="$APP_DIR/uploadPath" \
+            --server.port="$APP_PORT" \
+            > "$LOG_FILE" 2>&1 &
+
+          for i in $(seq 1 45); do
+            if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+              echo "java process exited during recovery"
+              tail -n 80 "$LOG_FILE" || true
+              exit 1
+            fi
+            HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP_PORT/" || true)"
+            if [ "$HTTP_CODE" != "000" ]; then
+              echo "existing backend recovered with http code $HTTP_CODE"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "existing backend did not respond during recovery"
+          tail -n 80 "$LOG_FILE" || true
+          exit 1
+          REMOTE
+
       - name: Upload backend package
         shell: bash
         run: |
