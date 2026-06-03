@@ -67,6 +67,7 @@ public class CourseApiController
     private static final List<Map<String, Object>> lessonRatings = new ArrayList<>();
     private static final List<Map<String, Object>> aiChats = new ArrayList<>();
     private static final List<Map<String, Object>> operationLogs = new ArrayList<>();
+    private static final Map<String, Object> frontendSettings = new LinkedHashMap<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
     private static final Map<String, String> verificationCodes = new ConcurrentHashMap<>();
 
@@ -81,6 +82,7 @@ public class CourseApiController
         initQuestions();
         initActivationCodes();
         initStudyData();
+        initFrontendSettings();
     }
 
     @PostConstruct
@@ -114,8 +116,13 @@ public class CourseApiController
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
                 restoreList(data, "operationLogs", operationLogs);
+                restoreMap(data, "frontendSettings", frontendSettings);
                 restoreProgress(data);
                 boolean changed = normalizeWrongQuestions();
+                if (ensureFrontendSettings())
+                {
+                    changed = true;
+                }
                 if (ensureBindTestStudent())
                 {
                     changed = true;
@@ -332,6 +339,12 @@ public class CourseApiController
         feedbacks.add(feedback);
         persistData();
         return AjaxResult.success(feedback);
+    }
+
+    @GetMapping("/app/settings")
+    public AjaxResult appFrontendSettings()
+    {
+        return AjaxResult.success(publicFrontendSettings());
     }
 
     @GetMapping("/app/courses")
@@ -1277,6 +1290,25 @@ public class CourseApiController
         ));
     }
 
+    @GetMapping("/admin/settings")
+    public AjaxResult adminFrontendSettings()
+    {
+        return AjaxResult.success(copyFrontendSettings());
+    }
+
+    @PostMapping("/admin/settings")
+    public AjaxResult saveAdminFrontendSettings(@RequestBody Map<String, Object> body)
+    {
+        synchronized (storeLock)
+        {
+            frontendSettings.clear();
+            frontendSettings.putAll(normalizeFrontendSettings(body));
+            logOperation("前端配置", "后台管理员", "首页与协议", "保存前端展示配置", "已完成");
+            persistData();
+            return AjaxResult.success(copyFrontendSettings());
+        }
+    }
+
     @GetMapping("/admin/courses")
     public AjaxResult adminCourses(@RequestParam Map<String, String> params)
     {
@@ -1788,6 +1820,7 @@ public class CourseApiController
         data.put("lessonRatings", copyList(lessonRatings));
         data.put("aiChats", copyList(aiChats));
         data.put("operationLogs", copyList(operationLogs));
+        data.put("frontendSettings", copyFrontendSettings());
         data.put("lessonProgress", copyProgress());
         return data;
     }
@@ -1828,6 +1861,162 @@ public class CourseApiController
                 target.add(new LinkedHashMap<>((Map<String, Object>) item));
             }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void restoreMap(Map<String, Object> data, String key, Map<String, Object> target)
+    {
+        Object value = data.get(key);
+        if (!(value instanceof Map))
+        {
+            return;
+        }
+        target.clear();
+        target.putAll(normalizeFrontendSettings(new LinkedHashMap<>((Map<String, Object>) value)));
+    }
+
+    private static boolean ensureFrontendSettings()
+    {
+        Map<String, Object> normalized = normalizeFrontendSettings(frontendSettings);
+        if (normalized.equals(frontendSettings))
+        {
+            return false;
+        }
+        frontendSettings.clear();
+        frontendSettings.putAll(normalized);
+        return true;
+    }
+
+    private static Map<String, Object> defaultFrontendSettings()
+    {
+        return map(
+            "homeBanners", list(defaultHomeBanner()),
+            "agreements", defaultAgreements()
+        );
+    }
+
+    private static Map<String, Object> defaultHomeBanner()
+    {
+        return map(
+            "id", "banner-default",
+            "title", "首页主图",
+            "imageUrl", "/static/home-banner.png",
+            "linkUrl", "",
+            "sort", 1,
+            "enabled", true,
+            "remark", "默认首页轮播图"
+        );
+    }
+
+    private static Map<String, Object> defaultAgreements()
+    {
+        return map(
+            "privacy", map(
+                "type", "privacy",
+                "title", "隐私政策",
+                "content", "请在后台配置隐私政策内容。",
+                "updatedAt", now()
+            ),
+            "user", map(
+                "type", "user",
+                "title", "用户协议",
+                "content", "请在后台配置用户协议内容。",
+                "updatedAt", now()
+            )
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> normalizeFrontendSettings(Map<String, Object> source)
+    {
+        Map<String, Object> settings = source == null ? new LinkedHashMap<>() : source;
+        List<Map<String, Object>> banners = new ArrayList<>();
+        Object rawBanners = settings.get("homeBanners");
+        if (rawBanners instanceof List)
+        {
+            for (Object item : (List<Object>) rawBanners)
+            {
+                if (!(item instanceof Map))
+                {
+                    continue;
+                }
+                Map<String, Object> banner = new LinkedHashMap<>((Map<String, Object>) item);
+                String imageUrl = str(banner.get("imageUrl")).trim();
+                if (imageUrl.length() == 0)
+                {
+                    imageUrl = str(banner.get("url")).trim();
+                }
+                if (imageUrl.length() == 0)
+                {
+                    continue;
+                }
+                banners.add(map(
+                    "id", valueOrDefault(banner.get("id"), "banner-" + System.nanoTime()),
+                    "title", valueOrDefault(banner.get("title"), "首页轮播图"),
+                    "imageUrl", imageUrl,
+                    "linkUrl", str(banner.get("linkUrl")).trim(),
+                    "sort", intValue(banner.get("sort")),
+                    "enabled", boolValue(banner.get("enabled"), !"disabled".equals(str(banner.get("status")))),
+                    "remark", str(banner.get("remark")).trim()
+                ));
+            }
+        }
+        if (banners.isEmpty())
+        {
+            banners.add(defaultHomeBanner());
+        }
+        banners.sort(Comparator.comparingInt(item -> intValue(item.get("sort"))));
+
+        Map<String, Object> agreements = defaultAgreements();
+        Object rawAgreements = settings.get("agreements");
+        if (rawAgreements instanceof Map)
+        {
+            Map<String, Object> map = (Map<String, Object>) rawAgreements;
+            agreements.put("privacy", normalizeAgreement("privacy", map.get("privacy"), agreements.get("privacy")));
+            agreements.put("user", normalizeAgreement("user", map.get("user"), agreements.get("user")));
+        }
+        return map("homeBanners", banners, "agreements", agreements);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> normalizeAgreement(String type, Object value, Object fallback)
+    {
+        Map<String, Object> base = fallback instanceof Map ? new LinkedHashMap<>((Map<String, Object>) fallback) : new LinkedHashMap<>();
+        if (value instanceof Map)
+        {
+            Map<String, Object> item = (Map<String, Object>) value;
+            base.put("title", valueOrDefault(item.get("title"), base.get("title")));
+            base.put("content", valueOrDefault(item.get("content"), base.get("content")));
+            base.put("updatedAt", valueOrDefault(item.get("updatedAt"), now()));
+        }
+        base.put("type", type);
+        return base;
+    }
+
+    private static Map<String, Object> copyFrontendSettings()
+    {
+        return normalizeFrontendSettings(frontendSettings);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> publicFrontendSettings()
+    {
+        Map<String, Object> copy = copyFrontendSettings();
+        List<Map<String, Object>> visibleBanners = new ArrayList<>();
+        for (Map<String, Object> banner : mapList(copy.get("homeBanners")))
+        {
+            if (boolValue(banner.get("enabled"), true))
+            {
+                visibleBanners.add(new LinkedHashMap<>(banner));
+            }
+        }
+        copy.put("homeBanners", visibleBanners);
+        Object rawAgreements = copy.get("agreements");
+        if (rawAgreements instanceof Map)
+        {
+            copy.put("agreements", new LinkedHashMap<>((Map<String, Object>) rawAgreements));
+        }
+        return copy;
     }
 
     @SuppressWarnings("unchecked")
@@ -2125,6 +2314,12 @@ public class CourseApiController
             map("id", "plan-2", "title", "完成导数基础 3 道巩固题", "type", "训练任务", "done", false),
             map("id", "plan-3", "title", "整理错题与巩固中的数列题", "type", "错题复盘", "done", false)
         )));
+    }
+
+    private static void initFrontendSettings()
+    {
+        frontendSettings.clear();
+        frontendSettings.putAll(defaultFrontendSettings());
     }
 
     private static Map<String, Object> mathTrial()
@@ -5345,6 +5540,20 @@ public class CourseApiController
         {
             return 0;
         }
+    }
+
+    private static boolean boolValue(Object value, boolean fallback)
+    {
+        if (value instanceof Boolean)
+        {
+            return (Boolean) value;
+        }
+        String text = str(value).trim().toLowerCase();
+        if (text.length() == 0)
+        {
+            return fallback;
+        }
+        return "true".equals(text) || "1".equals(text) || "yes".equals(text) || "enabled".equals(text);
     }
 
     private static double doubleValue(Object value)
