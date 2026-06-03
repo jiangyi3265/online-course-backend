@@ -2521,6 +2521,7 @@ public class CourseApiController
         result.put("title", stripCourseYear(result.get("title")));
         result.put("courseName", stripCourseYear(result.get("courseName")));
         result.put("introduction", stripCourseYear(result.get("introduction")));
+        result.put("available", hasActiveEnrollment(user, scopedCourseId(result.get("id"))));
         applyComputedCourseStats(result, user);
         applyAttemptStatusToCourse(result, user);
         return result;
