@@ -651,11 +651,19 @@ public class CourseApiController
     }
 
     @GetMapping("/app/practice")
-    public AjaxResult practice(@RequestParam String title, @RequestParam(required = false, defaultValue = "") String questionIds)
+    public AjaxResult practice(@RequestParam String title,
+                               @RequestParam(required = false, defaultValue = "") String questionIds,
+                               @RequestParam(required = false, defaultValue = "practice") String type,
+                               @RequestParam(required = false, defaultValue = "") String courseId)
     {
         List<String> ids = commaList(questionIds);
         List<Map<String, Object>> source = ids.isEmpty() ? questionsFor(title) : questionsByIds(ids);
-        return AjaxResult.success(map("title", title, "type", "practice", "questions", publicQuestions(source)));
+        if (shouldAutoDrawQuestions(type, title))
+        {
+            source = drawPaperQuestions(source, type);
+            persistData();
+        }
+        return AjaxResult.success(map("title", title, "type", type, "courseId", scopedCourseId(courseId), "questions", publicQuestions(source)));
     }
 
     @PostMapping("/app/practice/submit")
@@ -678,6 +686,8 @@ public class CourseApiController
             ids = stringList(quiz.get("questionIds"));
         }
         List<Map<String, Object>> source = ids.isEmpty() ? questionsFor(quizId) : questionsByIds(ids);
+        source = drawPaperQuestions(source, "quiz");
+        persistData();
         return AjaxResult.success(map("id", quizId, "title", quizId, "type", "quiz", "quiz", quiz, "questions", publicQuestions(source)));
     }
 
@@ -866,8 +876,13 @@ public class CourseApiController
         {
             return AjaxResult.error("题目不存在");
         }
-        int selected = intValue(body.get("selected"));
-        boolean correct = selected == intValue(question.get("answer"));
+        Object submitted = body.containsKey("answer") ? body.get("answer") : body.get("selected");
+        String questionType = questionType(question);
+        boolean manualReview = isSubjectiveQuestion(question);
+        int selected = isChoiceQuestion(question) ? intValue(submitted) : -1;
+        String selectedText = isChoiceQuestion(question) ? optionText(question, selected) : str(submitted).trim();
+        String answerText = correctAnswerText(question);
+        boolean correct = !manualReview && questionAnswerMatches(question, submitted);
         Map<String, Object> attempt = map(
             "id", "attempt-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
@@ -875,24 +890,29 @@ public class CourseApiController
             "type", "favorite",
             "total", 1,
             "correct", correct ? 1 : 0,
+            "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "selected", selected, "answer", question.get("answer"), "correct", correct, "analysis", question.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "correct", correct, "manualReview", manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
-        if (!correct)
+        if (!correct && !manualReview)
         {
             recordWrongQuestion(map(
                 "id", "wrong-" + System.currentTimeMillis(),
                 "userId", user == null ? null : user.get("id"),
                 "questionId", question.get("id"),
+                "questionType", questionType,
                 "title", "我的收藏",
                 "type", "favorite",
                 "stem", question.get("stem"),
                 "options", question.get("options"),
                 "answer", question.get("answer"),
+                "answerText", answerText,
                 "selected", selected,
+                "selectedText", selectedText,
                 "analysis", question.get("analysis"),
+                "analysisImageUrl", analysisImageUrl(question),
                 "videoAnalysisUrl", analysisVideoUrl(question),
                 "knowledge", question.get("knowledge"),
                 "mastered", false,
@@ -900,7 +920,7 @@ public class CourseApiController
             ), user);
         }
         persistData();
-        return AjaxResult.success(map("correct", correct, "answer", question.get("answer"), "analysis", question.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
+        return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
     }
 
     @GetMapping("/app/my/students")
@@ -1365,12 +1385,17 @@ public class CourseApiController
     @GetMapping("/admin/questions")
     public AjaxResult adminQuestions()
     {
+        for (Map<String, Object> question : questions)
+        {
+            normalizeQuestion(question);
+        }
         return AjaxResult.success(questions);
     }
 
     @PostMapping("/admin/questions")
     public AjaxResult addQuestion(@RequestBody Map<String, Object> question)
     {
+        normalizeQuestion(question);
         if (str(question.get("id")).length() == 0)
         {
             question.put("id", "q-" + System.currentTimeMillis());
@@ -1389,6 +1414,7 @@ public class CourseApiController
         {
             return AjaxResult.error("题目不存在");
         }
+        normalizeQuestion(body);
         question.putAll(body);
         question.put("id", id);
         logOperation("题库管理", "后台管理员", str(question.get("subjectName")), "编辑题目：" + str(question.get("stem")), "已完成");
@@ -1640,8 +1666,13 @@ public class CourseApiController
         {
             return AjaxResult.error("用户不存在");
         }
+        String courseId = str(body.get("courseId")).trim();
+        if (courseId.length() == 0 || findCourse(courseId) == null)
+        {
+            return AjaxResult.error("课程不存在，请先选择有效课程");
+        }
         String expiry = expiryByType(str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")));
-        Map<String, Object> order = createOrderRecord(str(body.get("courseId")), user, "后台开课", str(body.get("cardCode")), expiry, str(body.get("cardType")));
+        Map<String, Object> order = createOrderRecord(courseId, user, "后台开课", str(body.get("cardCode")), expiry, str(body.get("cardType")));
         order.put("studentName", str(body.get("studentName")));
         order.put("gender", str(body.get("gender")));
         order.put("recentExamScore", str(body.get("recentExamScore")));
@@ -1911,7 +1942,7 @@ public class CourseApiController
             "kp-gk-math-7", "kp-gk-math-8", "kp-gk-math-9", "kp-gk-math-10", "kp-gk-math-11",
             "kp-gk-math-12", "kp-gk-math-13", "kp-gk-math-14", "kp-gk-math-15", "kp-gk-math-16", "kp-gk-math-17"
         };
-        String[] questionIds = {"q-logic-1", "q-logic-2", "q-derivative-1", "q-series-1"};
+        String[] questionIds = {"q-logic-1", "q-logic-2", "q-derivative-1", "q-series-1", "q-blank-1", "q-blank-2", "q-subjective-1"};
         boolean changed = false;
         for (int i = 0; i < titles.length; i++)
         {
@@ -2062,10 +2093,13 @@ public class CourseApiController
 
     private static void initQuestions()
     {
-        questions.add(map("id", "q-logic-1", "stem", "已知集合 A={x|x>1}，B={x|x<4}，则 A∩B 为", "options", Arrays.asList("x>1", "x<4", "1<x<4", "空集"), "answer", 2, "analysis", "交集要同时满足两个条件，所以是 1<x<4。", "knowledge", "集合交集"));
-        questions.add(map("id", "q-logic-2", "stem", "命题“若 p 则 q”的逆否命题是", "options", Arrays.asList("若 q 则 p", "若非 p 则非 q", "若非 q 则非 p", "p 且 q"), "answer", 2, "analysis", "原命题与逆否命题等价，逆否为若非 q 则非 p。", "knowledge", "充分必要条件"));
-        questions.add(map("id", "q-derivative-1", "stem", "函数 f(x)=x^2 在 x=2 处的导数为", "options", Arrays.asList("2", "3", "4", "5"), "answer", 2, "analysis", "f'(x)=2x，代入 x=2 得 4。", "knowledge", "导数计算"));
-        questions.add(map("id", "q-series-1", "stem", "等差数列首项为 2，公差为 3，则第 5 项为", "options", Arrays.asList("11", "12", "13", "14"), "answer", 3, "analysis", "a5=a1+4d=2+12=14。", "knowledge", "等差数列"));
+        questions.add(map("id", "q-logic-1", "questionType", "choice", "stem", "已知集合 A={x|x>1}，B={x|x<4}，则 A∩B 为", "options", Arrays.asList("x>1", "x<4", "1<x<4", "空集"), "answer", 2, "analysis", "交集要同时满足两个条件，所以是 1<x<4。", "knowledge", "集合交集"));
+        questions.add(map("id", "q-logic-2", "questionType", "choice", "stem", "命题“若 p 则 q”的逆否命题是", "options", Arrays.asList("若 q 则 p", "若非 p 则非 q", "若非 q 则非 p", "p 且 q"), "answer", 2, "analysis", "原命题与逆否命题等价，逆否为若非 q 则非 p。", "knowledge", "充分必要条件"));
+        questions.add(map("id", "q-derivative-1", "questionType", "choice", "stem", "函数 f(x)=x^2 在 x=2 处的导数为", "options", Arrays.asList("2", "3", "4", "5"), "answer", 2, "analysis", "f'(x)=2x，代入 x=2 得 4。", "knowledge", "导数计算"));
+        questions.add(map("id", "q-series-1", "questionType", "choice", "stem", "等差数列首项为 2，公差为 3，则第 5 项为", "options", Arrays.asList("11", "12", "13", "14"), "answer", 3, "analysis", "a5=a1+4d=2+12=14。", "knowledge", "等差数列"));
+        questions.add(map("id", "q-blank-1", "questionType", "fill", "stem", "函数 f(x)=x^2 的导函数是 f'(x)=____。", "options", new ArrayList<Object>(), "answerText", "2x", "acceptableAnswers", Arrays.asList("2x", "2*x"), "analysis", "幂函数求导公式为 (x^n)'=nx^(n-1)，所以 x^2 的导函数是 2x。", "knowledge", "导数计算"));
+        questions.add(map("id", "q-blank-2", "questionType", "fill", "stem", "等差数列通项公式可写为 an=a1+____d。", "options", new ArrayList<Object>(), "answerText", "n-1", "acceptableAnswers", Arrays.asList("n-1", "(n-1)"), "analysis", "等差数列第 n 项比首项多 n-1 个公差。", "knowledge", "等差数列"));
+        questions.add(map("id", "q-subjective-1", "questionType", "subjective", "stem", "简述用导数判断函数单调性的基本步骤。", "options", new ArrayList<Object>(), "answerText", "先求定义域，再求导函数，解 f'(x)>0 和 f'(x)<0 的区间，最后写出对应的增减区间。", "analysis", "主观题重点看步骤完整性：定义域、求导、判符号、写区间。", "knowledge", "导数应用"));
     }
 
     private static void initActivationCodes()
@@ -2287,13 +2321,82 @@ public class CourseApiController
 
     private static Map<String, Object> courseForApp(Map<String, Object> course, Map<String, Object> user)
     {
-        Map<String, Object> result = new LinkedHashMap<>(course);
+        Map<String, Object> result = objectMapper.convertValue(course, new TypeReference<Map<String, Object>>() {});
         result.put("full", stripCourseYear(result.get("full")));
         result.put("title", stripCourseYear(result.get("title")));
         result.put("courseName", stripCourseYear(result.get("courseName")));
         result.put("introduction", stripCourseYear(result.get("introduction")));
         applyComputedCourseStats(result, user);
+        applyAttemptStatusToCourse(result, user);
         return result;
+    }
+
+    private static void applyAttemptStatusToCourse(Map<String, Object> course, Map<String, Object> user)
+    {
+        if (user == null)
+        {
+            return;
+        }
+        String courseId = scopedCourseId(course.get("id"));
+        applyQuizAttemptStatus(mapList(course.get("quizzes")), user, courseId, "quiz");
+        for (Map<String, Object> version : mapList(course.get("versions")))
+        {
+            for (Map<String, Object> chapter : mapList(version.get("chapters")))
+            {
+                for (Map<String, Object> lesson : mapList(chapter.get("items")))
+                {
+                    for (Map<String, Object> child : mapList(lesson.get("children")))
+                    {
+                        if (intValue(child.get("type")) == 2)
+                        {
+                            int count = attemptCount(user, courseId, str(child.get("name")), "");
+                            if (count > 0)
+                            {
+                                child.put("status", "已完成" + count + "次");
+                                child.put("read", count);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void applyQuizAttemptStatus(List<Map<String, Object>> quizzes, Map<String, Object> user, String courseId, String type)
+    {
+        for (Map<String, Object> quiz : quizzes)
+        {
+            int count = attemptCount(user, courseId, str(quiz.get("name")), type);
+            if (count > 0)
+            {
+                quiz.put("status", "已完成" + count + "次");
+            }
+        }
+    }
+
+    private static int attemptCount(Map<String, Object> user, String courseId, String title, String type)
+    {
+        int count = 0;
+        for (Map<String, Object> attempt : attempts)
+        {
+            if (!sameUser(attempt, user))
+            {
+                continue;
+            }
+            if (courseId.length() > 0 && !courseId.equals(scopedCourseId(attempt.get("courseId"))))
+            {
+                continue;
+            }
+            if (type.length() > 0 && !type.equals(str(attempt.get("type"))))
+            {
+                continue;
+            }
+            if (title.length() == 0 || title.equals(str(attempt.get("title"))) || str(attempt.get("title")).contains(title))
+            {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static void applyComputedCourseStats(Map<String, Object> course, Map<String, Object> user)
@@ -2460,12 +2563,27 @@ public class CourseApiController
         List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
         List<Map<String, Object>> source = questionIds.isEmpty() ? questionsFor(title) : questionsByIds(questionIds);
         int correct = 0;
+        int gradable = 0;
+        int manualReviewCount = 0;
         List<Map<String, Object>> details = new ArrayList<>();
         int index = 0;
         for (Map<String, Object> q : source)
         {
-            int selected = intValue(answers.get(q.get("id")));
-            boolean ok = selected == intValue(q.get("answer"));
+            Object submitted = answers.get(q.get("id"));
+            String questionType = questionType(q);
+            boolean manualReview = isSubjectiveQuestion(q);
+            boolean ok = !manualReview && questionAnswerMatches(q, submitted);
+            int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
+            String selectedText = isChoiceQuestion(q) ? optionText(q, selected) : str(submitted).trim();
+            String answerText = correctAnswerText(q);
+            if (manualReview)
+            {
+                manualReviewCount++;
+            }
+            else
+            {
+                gradable++;
+            }
             String sourceWrongId = index < sourceWrongIds.size() ? sourceWrongIds.get(index) : "";
             Map<String, Object> sourceWrong = sourceWrongId.length() == 0 ? null : findById(wrongQuestions, sourceWrongId);
             if (sourceWrong != null && (!sameUser(sourceWrong, user) || !courseId.equals(scopedCourseId(sourceWrong.get("courseId")))))
@@ -2478,12 +2596,13 @@ public class CourseApiController
             {
                 correct++;
             }
-            else
+            else if (!manualReview)
             {
                 Map<String, Object> wrong = map(
                     "id", "wrong-" + System.currentTimeMillis() + "-" + index,
                     "userId", user == null ? null : user.get("id"),
                     "questionId", q.get("id"),
+                    "questionType", questionType,
                     "sourceWrongId", sourceWrongId,
                     "originType", originType,
                     "courseId", payload.get("courseId"),
@@ -2495,8 +2614,11 @@ public class CourseApiController
                     "stem", q.get("stem"),
                     "options", q.get("options"),
                     "answer", q.get("answer"),
+                    "answerText", answerText,
                     "selected", selected,
+                    "selectedText", selectedText,
                     "analysis", q.get("analysis"),
+                    "analysisImageUrl", analysisImageUrl(q),
                     "videoAnalysisUrl", analysisVideoUrl(q),
                     "knowledge", q.get("knowledge"),
                     "mastered", false,
@@ -2506,12 +2628,16 @@ public class CourseApiController
                 );
                 recordWrongQuestion(wrong, user);
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "selected", selected, "answer", q.get("answer"), "correct", ok, "analysis", q.get("analysis"), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "correct", ok, "manualReview", manualReview, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
-            detail.put("selectedText", optionText(q, selected));
-            detail.put("answerText", optionText(q, intValue(q.get("answer"))));
+            detail.put("selectedText", selectedText);
+            if (isChoiceQuestion(q))
+            {
+                detail.put("answerText", optionText(q, intValue(q.get("answer"))));
+            }
             detail.put("videoAnalysisUrl", analysisVideoUrl(q));
+            detail.put("analysisImageUrl", analysisImageUrl(q));
             index++;
         }
         updateWrongRetryStats(type, sourceWrongIds, details, user, courseId);
@@ -2526,7 +2652,8 @@ public class CourseApiController
             "sourceType", sourceLabel(type),
             "total", source.size(),
             "correct", correct,
-            "score", source.isEmpty() ? 0 : Math.round(correct * 100f / source.size()),
+            "manualReviewCount", manualReviewCount,
+            "score", gradable <= 0 ? 0 : Math.round(correct * 100f / gradable),
             "createdAt", now(),
             "details", details
         );
@@ -2538,15 +2665,15 @@ public class CourseApiController
     {
         if (title.contains("导数") || title.contains("极值"))
         {
-            return questionsByIds(Arrays.asList("q-derivative-1", "q-logic-2"));
+            return questionsByIds(Arrays.asList("q-derivative-1", "q-logic-2", "q-blank-1", "q-subjective-1"));
         }
         if (title.contains("数列") || title.contains("通项"))
         {
-            return questionsByIds(Arrays.asList("q-series-1", "q-logic-1"));
+            return questionsByIds(Arrays.asList("q-series-1", "q-logic-1", "q-blank-2", "q-subjective-1"));
         }
         if (title.contains("集合") || title.contains("逻辑") || title.contains("不等式"))
         {
-            return questionsByIds(Arrays.asList("q-logic-1", "q-logic-2"));
+            return questionsByIds(Arrays.asList("q-logic-1", "q-logic-2", "q-blank-1", "q-subjective-1"));
         }
         return questions.subList(0, Math.min(3, questions.size()));
     }
@@ -2593,6 +2720,94 @@ public class CourseApiController
         return list;
     }
 
+    private static boolean shouldAutoDrawQuestions(String type, String title)
+    {
+        String normalizedType = str(type).trim();
+        String normalizedTitle = str(title);
+        return "quiz".equals(normalizedType)
+            || "reinforce".equals(normalizedType)
+            || normalizedTitle.contains("章节扫雷")
+            || normalizedTitle.contains("复习测试")
+            || normalizedTitle.contains("知识巩固");
+    }
+
+    private static List<Map<String, Object>> drawPaperQuestions(List<Map<String, Object>> source, String type)
+    {
+        if (source == null || source.isEmpty())
+        {
+            return source == null ? new ArrayList<>() : source;
+        }
+        List<Map<String, Object>> selected = new ArrayList<>();
+        Set<String> usedIds = new LinkedHashSet<>();
+        drawByQuestionType(source, selected, usedIds, "choice", 6, type);
+        drawByQuestionType(source, selected, usedIds, "fill", 3, type);
+        drawByQuestionType(source, selected, usedIds, "subjective", 1, type);
+        if (selected.size() < Math.min(10, source.size()))
+        {
+            drawByQuestionType(source, selected, usedIds, "", Math.min(10, source.size()) - selected.size(), type);
+        }
+        incrementQuestionDrawStats(selected, type);
+        return selected;
+    }
+
+    private static void drawByQuestionType(List<Map<String, Object>> source, List<Map<String, Object>> selected, Set<String> usedIds, String questionType, int limit, String drawType)
+    {
+        if (limit <= 0)
+        {
+            return;
+        }
+        List<Map<String, Object>> candidates = new ArrayList<>();
+        for (Map<String, Object> question : source)
+        {
+            String id = str(question.get("id"));
+            if (id.length() == 0 || usedIds.contains(id))
+            {
+                continue;
+            }
+            if (questionType.length() == 0 || questionType.equals(questionType(question)))
+            {
+                candidates.add(question);
+            }
+        }
+        Collections.shuffle(candidates);
+        String countKey = drawCounterKey(drawType);
+        candidates.sort((a, b) -> Integer.compare(intValue(a.get(countKey)), intValue(b.get(countKey))));
+        for (Map<String, Object> question : candidates)
+        {
+            selected.add(question);
+            usedIds.add(str(question.get("id")));
+            if (selected.size() >= 10 || --limit <= 0)
+            {
+                return;
+            }
+        }
+    }
+
+    private static String drawCounterKey(String type)
+    {
+        String value = str(type).trim();
+        if ("quiz".equals(value))
+        {
+            return "quizDrawCount";
+        }
+        if ("reinforce".equals(value))
+        {
+            return "reinforceDrawCount";
+        }
+        return "drawCount";
+    }
+
+    private static void incrementQuestionDrawStats(List<Map<String, Object>> selected, String type)
+    {
+        String countKey = drawCounterKey(type);
+        for (Map<String, Object> question : selected)
+        {
+            question.put("drawCount", intValue(question.get("drawCount")) + 1);
+            question.put(countKey, intValue(question.get(countKey)) + 1);
+            question.put("lastDrawnAt", now());
+        }
+    }
+
     private static List<Map<String, Object>> publicQuestions(List<Map<String, Object>> source)
     {
         List<Map<String, Object>> list = new ArrayList<>();
@@ -2600,9 +2815,150 @@ public class CourseApiController
         {
             Map<String, Object> item = new LinkedHashMap<>(q);
             item.remove("answer");
+            item.remove("answerText");
+            item.remove("acceptableAnswers");
             list.add(item);
         }
         return list;
+    }
+
+    private static void normalizeQuestion(Map<String, Object> question)
+    {
+        String type = questionType(question);
+        question.put("questionType", type);
+        if (!question.containsKey("difficulty") || intValue(question.get("difficulty")) <= 0)
+        {
+            question.put("difficulty", 1);
+        }
+        String imageUrl = analysisImageUrl(question);
+        if (imageUrl.length() > 0)
+        {
+            question.put("analysisImageUrl", imageUrl);
+        }
+        String videoUrl = analysisVideoUrl(question);
+        if (videoUrl.length() > 0)
+        {
+            question.put("videoAnalysisUrl", videoUrl);
+        }
+        if (isChoiceQuestion(question))
+        {
+            if (!(question.get("options") instanceof List))
+            {
+                question.put("options", new ArrayList<Object>());
+            }
+            question.put("answer", intValue(question.get("answer")));
+            return;
+        }
+        if (!(question.get("options") instanceof List))
+        {
+            question.put("options", new ArrayList<Object>());
+        }
+        String answerText = valueOrDefault(question.get("answerText"), question.get("answer")).trim();
+        question.put("answerText", answerText);
+        if ("fill".equals(type) && stringList(question.get("acceptableAnswers")).isEmpty() && answerText.length() > 0)
+        {
+            question.put("acceptableAnswers", answerCandidates(answerText));
+        }
+    }
+
+    private static String questionType(Map<String, Object> question)
+    {
+        if (question == null)
+        {
+            return "choice";
+        }
+        String raw = str(question.get("questionType")).trim();
+        if (raw.length() == 0)
+        {
+            raw = str(question.get("type")).trim();
+        }
+        if ("填空题".equals(raw) || "填空".equals(raw) || "blank".equals(raw) || "fill_blank".equals(raw))
+        {
+            return "fill";
+        }
+        if ("主观题".equals(raw) || "主观".equals(raw) || "essay".equals(raw) || "subject".equals(raw))
+        {
+            return "subjective";
+        }
+        if ("fill".equals(raw) || "subjective".equals(raw))
+        {
+            return raw;
+        }
+        return "choice";
+    }
+
+    private static boolean isChoiceQuestion(Map<String, Object> question)
+    {
+        return "choice".equals(questionType(question));
+    }
+
+    private static boolean isSubjectiveQuestion(Map<String, Object> question)
+    {
+        return "subjective".equals(questionType(question));
+    }
+
+    private static boolean questionAnswerMatches(Map<String, Object> question, Object submitted)
+    {
+        if (isChoiceQuestion(question))
+        {
+            return intValue(submitted) == intValue(question.get("answer"));
+        }
+        if (isSubjectiveQuestion(question))
+        {
+            return false;
+        }
+        String answer = normalizeAnswerText(str(submitted));
+        if (answer.length() == 0)
+        {
+            return false;
+        }
+        for (String candidate : answerCandidates(correctAnswerText(question)))
+        {
+            if (answer.equals(normalizeAnswerText(candidate)))
+            {
+                return true;
+            }
+        }
+        for (String candidate : stringList(question.get("acceptableAnswers")))
+        {
+            if (answer.equals(normalizeAnswerText(candidate)))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String correctAnswerText(Map<String, Object> question)
+    {
+        if (question == null)
+        {
+            return "";
+        }
+        if (isChoiceQuestion(question))
+        {
+            return optionText(question, intValue(question.get("answer")));
+        }
+        return valueOrDefault(question.get("answerText"), question.get("answer")).trim();
+    }
+
+    private static List<String> answerCandidates(String value)
+    {
+        List<String> list = new ArrayList<>();
+        for (String item : str(value).split("[\\n；;|、，,]"))
+        {
+            String text = item.trim();
+            if (text.length() > 0)
+            {
+                list.add(text);
+            }
+        }
+        return list;
+    }
+
+    private static String normalizeAnswerText(String value)
+    {
+        return str(value).trim().replaceAll("\\s+", "").toLowerCase();
     }
 
     private static Map<String, Object> recordWrongQuestion(Map<String, Object> wrong, Map<String, Object> user)
@@ -2709,8 +3065,10 @@ public class CourseApiController
     private static String questionFingerprint(Map<String, Object> question)
     {
         String seed = normalizeQuestionText(question.get("stem")) + "|"
+            + normalizeQuestionText(question.get("questionType")) + "|"
             + normalizeQuestionText(question.get("options")) + "|"
-            + normalizeQuestionText(question.get("answer"));
+            + normalizeQuestionText(question.get("answer")) + "|"
+            + normalizeQuestionText(question.get("answerText"));
         if (seed.replace("|", "").length() == 0)
         {
             return "";
@@ -2829,6 +3187,24 @@ public class CourseApiController
         if (url.length() == 0)
         {
             url = str(question.get("explainVideoUrl")).trim();
+        }
+        return url;
+    }
+
+    private static String analysisImageUrl(Map<String, Object> question)
+    {
+        if (question == null)
+        {
+            return "";
+        }
+        String url = str(question.get("analysisImageUrl")).trim();
+        if (url.length() == 0)
+        {
+            url = str(question.get("imageAnalysisUrl")).trim();
+        }
+        if (url.length() == 0)
+        {
+            url = str(question.get("explainImageUrl")).trim();
         }
         return url;
     }
@@ -3068,16 +3444,22 @@ public class CourseApiController
         {
             Map<String, Object> detail = details.get(i);
             Map<String, Object> question = findById(questions, str(detail.get("id")));
+            String type = questionType(question == null ? detail : question);
+            String myAnswer = "choice".equals(type) ? answerLetter(detail.get("selected")) : str(detail.get("selectedText")).trim();
+            String correctAnswer = "choice".equals(type) ? answerLetter(detail.get("answer")) : str(detail.get("answerText")).trim();
             rows.add(map(
                 "questionNo", i + 1,
                 "total", total,
                 "stem", detail.get("stem"),
-                "myAnswer", answerLetter(detail.get("selected")),
-                "correctAnswer", answerLetter(detail.get("answer")),
-                "myAnswerText", question == null ? answerLetter(detail.get("selected")) : optionText(question, intValue(detail.get("selected"))),
-                "correctAnswerText", question == null ? answerLetter(detail.get("answer")) : optionText(question, intValue(detail.get("answer"))),
+                "questionType", type,
+                "myAnswer", myAnswer.length() == 0 ? "--" : myAnswer,
+                "correctAnswer", correctAnswer.length() == 0 ? "--" : correctAnswer,
+                "myAnswerText", str(detail.get("selectedText")).trim().length() > 0 ? detail.get("selectedText") : myAnswer,
+                "correctAnswerText", str(detail.get("answerText")).trim().length() > 0 ? detail.get("answerText") : (question == null ? correctAnswer : optionText(question, intValue(detail.get("answer")))),
                 "correct", Boolean.TRUE.equals(detail.get("correct")),
+                "manualReview", Boolean.TRUE.equals(detail.get("manualReview")),
                 "analysis", detail.get("analysis"),
+                "analysisImageUrl", detail.get("analysisImageUrl"),
                 "videoAnalysisUrl", detail.get("videoAnalysisUrl")
             ));
         }
@@ -3166,6 +3548,8 @@ public class CourseApiController
         {
             Map<String, Object> item = new LinkedHashMap<>(question);
             item.remove("answer");
+            item.remove("answerText");
+            item.remove("acceptableAnswers");
             return item;
         }
         if (str(wrong.get("stem")).length() == 0)
@@ -3175,8 +3559,10 @@ public class CourseApiController
         return map(
             "id", wrong.get("questionId"),
             "stem", wrong.get("stem"),
+            "questionType", wrong.get("questionType"),
             "options", wrong.get("options"),
             "knowledge", wrong.get("knowledge"),
+            "analysisImageUrl", wrong.get("analysisImageUrl"),
             "videoAnalysisUrl", wrong.get("videoAnalysisUrl")
         );
     }
@@ -4828,6 +5214,13 @@ public class CourseApiController
         {
             course.put("versions", list(map("name", "2026版", "chapters", new ArrayList<Object>())));
         }
+        List<Map<String, Object>> versions = mapList(course.get("versions"));
+        while (versions.size() < 3)
+        {
+            String name = versions.size() == 1 ? "绝招课" : "知识巩固";
+            versions.add(map("name", name, "chapters", new ArrayList<Object>()));
+        }
+        course.put("versions", versions);
         if (!course.containsKey("chapters"))
         {
             course.put("chapters", new ArrayList<Object>());
