@@ -66,6 +66,7 @@ public class CourseApiController
     private static final List<Map<String, Object>> wrongQuestions = new ArrayList<>();
     private static final List<Map<String, Object>> lessonRatings = new ArrayList<>();
     private static final List<Map<String, Object>> aiChats = new ArrayList<>();
+    private static final List<Map<String, Object>> operationLogs = new ArrayList<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
     private static final Map<String, String> verificationCodes = new ConcurrentHashMap<>();
 
@@ -112,6 +113,7 @@ public class CourseApiController
                 restoreList(data, "wrongQuestions", wrongQuestions);
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
+                restoreList(data, "operationLogs", operationLogs);
                 restoreProgress(data);
                 boolean changed = normalizeWrongQuestions();
                 if (ensureBindTestStudent())
@@ -627,11 +629,12 @@ public class CourseApiController
                 break;
             }
         }
-        if (existing == null)
+        if (existing != null)
         {
-            existing = map("id", "rating-" + System.currentTimeMillis());
-            lessonRatings.add(existing);
+            return AjaxResult.error("本节课程已评分，不能重复修改");
         }
+        existing = map("id", "rating-" + System.currentTimeMillis());
+        lessonRatings.add(existing);
         existing.put("lessonId", lessonId);
         existing.put("lessonTitle", body.get("lessonTitle") == null ? lessonId : body.get("lessonTitle"));
         existing.put("courseId", meta.get("courseId"));
@@ -648,9 +651,11 @@ public class CourseApiController
     }
 
     @GetMapping("/app/practice")
-    public AjaxResult practice(@RequestParam String title)
+    public AjaxResult practice(@RequestParam String title, @RequestParam(required = false, defaultValue = "") String questionIds)
     {
-        return AjaxResult.success(map("title", title, "type", "practice", "questions", publicQuestions(questionsFor(title))));
+        List<String> ids = commaList(questionIds);
+        List<Map<String, Object>> source = ids.isEmpty() ? questionsFor(title) : questionsByIds(ids);
+        return AjaxResult.success(map("title", title, "type", "practice", "questions", publicQuestions(source)));
     }
 
     @PostMapping("/app/practice/submit")
@@ -662,9 +667,18 @@ public class CourseApiController
     }
 
     @GetMapping("/app/quiz")
-    public AjaxResult quiz(@RequestParam String quizId)
+    public AjaxResult quiz(@RequestParam String quizId,
+                           @RequestParam(required = false, defaultValue = "") String courseId,
+                           @RequestParam(required = false, defaultValue = "") String questionIds)
     {
-        return AjaxResult.success(map("id", quizId, "title", quizId, "type", "quiz", "questions", publicQuestions(questionsFor(quizId))));
+        List<String> ids = commaList(questionIds);
+        Map<String, Object> quiz = findCourseQuiz(quizId, courseId);
+        if (ids.isEmpty() && quiz != null)
+        {
+            ids = stringList(quiz.get("questionIds"));
+        }
+        List<Map<String, Object>> source = ids.isEmpty() ? questionsFor(quizId) : questionsByIds(ids);
+        return AjaxResult.success(map("id", quizId, "title", quizId, "type", "quiz", "quiz", quiz, "questions", publicQuestions(source)));
     }
 
     @PostMapping("/app/quiz/submit")
@@ -1177,13 +1191,14 @@ public class CourseApiController
     {
         String code = normalizeCardCode(body.get("code"));
         String studentName = str(body.get("studentName")).trim();
+        String gender = str(body.get("gender")).trim();
         String recentExamScore = str(body.get("recentExamScore")).trim();
         String grade = str(body.get("grade")).trim();
         String schoolName = str(body.get("schoolName")).trim();
         String region = str(body.get("region")).trim();
-        if (code.length() == 0 || studentName.length() == 0 || recentExamScore.length() == 0 || grade.length() == 0 || schoolName.length() == 0 || region.length() == 0)
+        if (code.length() == 0 || studentName.length() == 0 || gender.length() == 0 || recentExamScore.length() == 0 || grade.length() == 0 || schoolName.length() == 0 || region.length() == 0)
         {
-            return AjaxResult.error("请填写激活码、学生名字、科目最近考试分数、年级、学校名字和所在地区");
+            return AjaxResult.error("请填写激活码、学生名字、性别、科目最近考试分数、年级、学校名字和所在地区");
         }
         Map<String, Object> card = findActivationCode(code);
         if (card == null)
@@ -1199,6 +1214,7 @@ public class CourseApiController
         Map<String, Object> user = currentUser(request);
         Map<String, Object> order = createOrderRecord(courseId, user, "激活码开通", code, expiry, str(card.get("cardType")));
         order.put("studentName", studentName);
+        order.put("gender", gender);
         order.put("recentExamScore", recentExamScore);
         order.put("grade", grade);
         order.put("schoolName", schoolName);
@@ -1210,6 +1226,7 @@ public class CourseApiController
         card.put("usedByUserId", user == null ? null : user.get("id"));
         card.put("usedByName", user == null ? "" : user.get("name"));
         card.put("studentName", studentName);
+        card.put("gender", gender);
         card.put("recentExamScore", recentExamScore);
         card.put("grade", grade);
         card.put("schoolName", schoolName);
@@ -1225,7 +1242,9 @@ public class CourseApiController
     {
         return AjaxResult.success(map(
             "courseTotal", courses.size(),
+            "courseStats", courseKindStats(),
             "userTotal", users.size(),
+            "userStats", userStats(),
             "orderTotal", orders.size(),
             "authPending", countStatus(authRequests, "pending"),
             "activationStats", activationStats(),
@@ -1253,6 +1272,7 @@ public class CourseApiController
         }
         ensureCourseDefaults(course);
         courses.add(course);
+        logOperation("课程管理", "后台管理员", course.get("courseName"), "新增课程", "已完成");
         persistData();
         return AjaxResult.success(course);
     }
@@ -1268,6 +1288,7 @@ public class CourseApiController
         course.putAll(body);
         course.put("id", id);
         ensureCourseDefaults(course);
+        logOperation("课程管理", "后台管理员", course.get("courseName"), "编辑课程", "已完成");
         persistData();
         return AjaxResult.success(course);
     }
@@ -1275,7 +1296,9 @@ public class CourseApiController
     @DeleteMapping("/admin/courses/{id}")
     public AjaxResult deleteCourse(@PathVariable String id)
     {
+        Map<String, Object> course = findCourse(id);
         courses.removeIf(item -> id.equals(item.get("id")));
+        logOperation("课程管理", "后台管理员", course == null ? id : course.get("courseName"), "删除课程", "已完成");
         persistData();
         return AjaxResult.success();
     }
@@ -1308,6 +1331,7 @@ public class CourseApiController
         }
         ensureDocDefaults(doc);
         docs.add(doc);
+        logOperation("资料管理", "后台管理员", doc.get("title"), "新增资料", "已完成");
         persistData();
         return AjaxResult.success(doc);
     }
@@ -1323,6 +1347,7 @@ public class CourseApiController
         doc.putAll(body);
         doc.put("id", id);
         ensureDocDefaults(doc);
+        logOperation("资料管理", "后台管理员", doc.get("title"), "编辑资料", "已完成");
         persistData();
         return AjaxResult.success(doc);
     }
@@ -1330,7 +1355,9 @@ public class CourseApiController
     @DeleteMapping("/admin/docs/{id}")
     public AjaxResult deleteDoc(@PathVariable String id)
     {
+        Map<String, Object> doc = findById(docs, id);
         docs.removeIf(item -> id.equals(item.get("id")));
+        logOperation("资料管理", "后台管理员", doc == null ? id : doc.get("title"), "删除资料", "已完成");
         persistData();
         return AjaxResult.success();
     }
@@ -1349,6 +1376,7 @@ public class CourseApiController
             question.put("id", "q-" + System.currentTimeMillis());
         }
         questions.add(question);
+        logOperation("题库管理", "后台管理员", str(question.get("subjectName")), "新增题目：" + str(question.get("stem")), "已完成");
         persistData();
         return AjaxResult.success(question);
     }
@@ -1363,6 +1391,7 @@ public class CourseApiController
         }
         question.putAll(body);
         question.put("id", id);
+        logOperation("题库管理", "后台管理员", str(question.get("subjectName")), "编辑题目：" + str(question.get("stem")), "已完成");
         persistData();
         return AjaxResult.success(question);
     }
@@ -1370,7 +1399,9 @@ public class CourseApiController
     @DeleteMapping("/admin/questions/{id}")
     public AjaxResult deleteQuestion(@PathVariable String id)
     {
+        Map<String, Object> question = findById(questions, id);
         questions.removeIf(item -> id.equals(item.get("id")));
+        logOperation("题库管理", "后台管理员", question == null ? "" : str(question.get("subjectName")), "删除题目：" + (question == null ? id : str(question.get("stem"))), "已完成");
         persistData();
         return AjaxResult.success();
     }
@@ -1405,11 +1436,17 @@ public class CourseApiController
         putIfPresent(user, body, "name");
         putIfPresent(user, body, "phone");
         putIfPresent(user, body, "status");
+        putIfPresent(user, body, "gender");
+        putIfPresent(user, body, "grade");
+        putIfPresent(user, body, "schoolName");
+        putIfPresent(user, body, "region");
+        putIfPresent(user, body, "recentExamScore");
         putIfPresent(user, body, "remark");
         if ("agency_admin".equals(role) && str(user.get("agencyId")).length() == 0)
         {
             user.put("agencyId", user.get("id"));
         }
+        logOperation("用户管理", user.get("name"), "", "编辑用户信息/角色：" + role, "已完成");
         persistData();
         return AjaxResult.success(publicUser(user));
     }
@@ -1441,6 +1478,7 @@ public class CourseApiController
         );
         card.put("remark", str(body.get("remark")));
         activationCodes.add(card);
+        logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "新增激活码：" + code, "已完成");
         persistData();
         return AjaxResult.success(card);
     }
@@ -1463,6 +1501,7 @@ public class CourseApiController
         putIfPresent(card, body, "cardType");
         putIfPresent(card, body, "remark");
         card.put("updatedAt", now());
+        logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "编辑激活码：" + card.get("code"), str(card.get("status")));
         persistData();
         return AjaxResult.success(card);
     }
@@ -1480,6 +1519,7 @@ public class CourseApiController
             return AjaxResult.error("已使用激活码不能删除");
         }
         activationCodes.remove(card);
+        logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "删除激活码：" + card.get("code"), "已完成");
         persistData();
         return AjaxResult.success();
     }
@@ -1502,9 +1542,19 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码已使用或已锁定，不能激活");
         }
+        String courseId = str(body.get("courseId")).trim();
+        if (courseId.length() == 0)
+        {
+            courseId = str(card.get("courseId"));
+        }
+        if (findCourse(courseId) == null)
+        {
+            return AjaxResult.error("课程不存在");
+        }
         String expiry = expiryForCard(card);
-        Map<String, Object> order = createOrderRecord(str(card.get("courseId")), user, "后台激活码开通", code, expiry, str(card.get("cardType")));
+        Map<String, Object> order = createOrderRecord(courseId, user, "后台激活码开通", code, expiry, str(card.get("cardType")));
         order.put("studentName", valueOrDefault(body.get("studentName"), user.get("name")));
+        order.put("gender", valueOrDefault(body.get("gender"), user.get("gender")));
         order.put("recentExamScore", str(body.get("recentExamScore")));
         order.put("grade", valueOrDefault(body.get("grade"), user.get("grade")));
         order.put("schoolName", str(body.get("schoolName")));
@@ -1515,13 +1565,17 @@ public class CourseApiController
         card.put("status", "used");
         card.put("usedByUserId", user.get("id"));
         card.put("usedByName", user.get("name"));
+        card.put("courseId", courseId);
+        putIfPresent(card, card, "courseId");
         card.put("studentName", order.get("studentName"));
+        card.put("gender", order.get("gender"));
         card.put("recentExamScore", order.get("recentExamScore"));
         card.put("grade", order.get("grade"));
         card.put("schoolName", order.get("schoolName"));
         card.put("region", order.get("region"));
         card.put("activatedAt", now());
         card.put("expiresAt", expiry);
+        logOperation("授权开通", user.get("name"), order.get("courseTitle"), "后台激活码开通：" + code, "已开通");
         persistData();
         return AjaxResult.success(order);
     }
@@ -1566,6 +1620,7 @@ public class CourseApiController
                 "source", "后台授权"
             ));
         }
+        logOperation("授权开通", request.get("userName"), request.get("courseId"), "处理授权申请", request.get("status"));
         persistData();
         return AjaxResult.success(request);
     }
@@ -1581,15 +1636,21 @@ public class CourseApiController
     public AjaxResult adminCreateOrder(@RequestBody Map<String, Object> body)
     {
         Map<String, Object> user = findById(users, str(body.get("userId")));
+        if (user == null)
+        {
+            return AjaxResult.error("用户不存在");
+        }
         String expiry = expiryByType(str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")));
         Map<String, Object> order = createOrderRecord(str(body.get("courseId")), user, "后台开课", str(body.get("cardCode")), expiry, str(body.get("cardType")));
         order.put("studentName", str(body.get("studentName")));
+        order.put("gender", str(body.get("gender")));
         order.put("recentExamScore", str(body.get("recentExamScore")));
         order.put("grade", str(body.get("grade")));
         order.put("schoolName", str(body.get("schoolName")));
         order.put("region", str(body.get("region")));
         order.put("expiresAt", expiry);
         updateEnrollmentFromOrder(order);
+        logOperation("授权开通", user.get("name"), order.get("courseTitle"), "后台手动开课", "已开通");
         persistData();
         return AjaxResult.success(order);
     }
@@ -1605,6 +1666,7 @@ public class CourseApiController
         order.put("status", "closed");
         order.put("closedAt", now());
         closeEnrollmentForOrder(order);
+        logOperation("授权开通", order.get("userName"), order.get("courseTitle"), "关闭课程权限", "已关闭");
         persistData();
         return AjaxResult.success(order);
     }
@@ -1618,6 +1680,7 @@ public class CourseApiController
             "lessonProgress", new ArrayList<>(lessonProgress.values()),
             "lessonRatings", lessonRatings,
             "aiChats", aiChats,
+            "operationLogs", operationLogs,
             "feedbacks", feedbacks,
             "reinforcePoints", reinforcePoints,
             "studyPlans", studyPlans
@@ -1655,6 +1718,24 @@ public class CourseApiController
         }
     }
 
+    private static void logOperation(String type, Object user, Object course, Object detail, Object status)
+    {
+        Map<String, Object> log = map(
+            "id", "op-" + System.currentTimeMillis(),
+            "type", type,
+            "user", str(user).length() == 0 ? "后台管理员" : user,
+            "course", course,
+            "detail", detail,
+            "status", status,
+            "time", now()
+        );
+        operationLogs.add(log);
+        while (operationLogs.size() > 1000)
+        {
+            operationLogs.remove(0);
+        }
+    }
+
     private static Map<String, Object> snapshotData()
     {
         Map<String, Object> data = new LinkedHashMap<>();
@@ -1675,6 +1756,7 @@ public class CourseApiController
         data.put("wrongQuestions", copyList(wrongQuestions));
         data.put("lessonRatings", copyList(lessonRatings));
         data.put("aiChats", copyList(aiChats));
+        data.put("operationLogs", copyList(operationLogs));
         data.put("lessonProgress", copyProgress());
         return data;
     }
@@ -2467,6 +2549,34 @@ public class CourseApiController
             return questionsByIds(Arrays.asList("q-logic-1", "q-logic-2"));
         }
         return questions.subList(0, Math.min(3, questions.size()));
+    }
+
+    private static Map<String, Object> findCourseQuiz(String quizId, String courseId)
+    {
+        String target = str(quizId).trim();
+        String scopedCourseId = str(courseId).trim();
+        if (target.length() == 0)
+        {
+            return null;
+        }
+        for (Map<String, Object> course : courses)
+        {
+            if (scopedCourseId.length() > 0 && !scopedCourseId.equals(str(course.get("id"))))
+            {
+                continue;
+            }
+            List<Map<String, Object>> quizList = new ArrayList<>();
+            quizList.addAll(mapList(course.get("quizzes")));
+            quizList.addAll(mapList(course.get("knowledgeQuizzes")));
+            for (Map<String, Object> quiz : quizList)
+            {
+                if (target.equals(str(quiz.get("id"))) || target.equals(str(quiz.get("name"))))
+                {
+                    return quiz;
+                }
+            }
+        }
+        return null;
     }
 
     private static List<Map<String, Object>> questionsByIds(List<String> ids)
@@ -3449,9 +3559,90 @@ public class CourseApiController
             "unusedCount", assignedUnused,
             "lockedCount", locked,
             "userCount", agencyUserCount(userId),
+            "openPeopleCount", agencyUserCount(userId),
+            "activatedCourseCount", agencyActivatedCourseCount(userId),
+            "referralCount", agencyUserCount(userId),
+            "boundStudentCount", usedStudents.size(),
             "codes", cards,
             "students", usedStudents
         );
+    }
+
+    private static Map<String, Object> courseKindStats()
+    {
+        int trial = 0;
+        int full = 0;
+        for (Map<String, Object> course : courses)
+        {
+            if ("trial".equals(course.get("kind")))
+            {
+                trial++;
+            }
+            else
+            {
+                full++;
+            }
+        }
+        return map("trial", trial, "full", full);
+    }
+
+    private static Map<String, Object> userStats()
+    {
+        int agencyCount = 0;
+        int agencyWithQuota = 0;
+        int formalStudents = 0;
+        int trialStudents = 0;
+        Set<String> openPeople = new LinkedHashSet<>();
+        for (Map<String, Object> enrollment : enrollments)
+        {
+            if (isEnrollmentOpen(enrollment))
+            {
+                openPeople.add(str(enrollment.get("userId")));
+            }
+        }
+        for (Map<String, Object> user : users)
+        {
+            String role = str(user.get("role"));
+            if ("agency_admin".equals(role))
+            {
+                agencyCount++;
+                if (intValue(user.get("activationQuota")) > 0)
+                {
+                    agencyWithQuota++;
+                }
+            }
+            else if ("student".equals(role) || role.length() == 0)
+            {
+                if (openPeople.contains(str(user.get("id"))))
+                {
+                    formalStudents++;
+                }
+                else
+                {
+                    trialStudents++;
+                }
+            }
+        }
+        return map(
+            "agencyCount", agencyCount,
+            "agencyWithQuota", agencyWithQuota,
+            "formalStudents", formalStudents,
+            "trialStudents", trialStudents,
+            "openPeopleCount", openPeople.size()
+        );
+    }
+
+    private static int agencyActivatedCourseCount(String agencyUserId)
+    {
+        Set<String> courseIds = new LinkedHashSet<>();
+        for (Map<String, Object> card : activationCodes)
+        {
+            if (agencyUserId.equals(str(card.get("ownerUserId"))) && "used".equals(card.get("status")) && str(card.get("courseId")).length() > 0)
+            {
+                courseIds.add(str(card.get("courseId")));
+            }
+        }
+        return courseIds.size();
     }
 
     private static List<Map<String, Object>> agencyStats()
@@ -3503,6 +3694,7 @@ public class CourseApiController
         int used = 0;
         int assignedUnused = 0;
         int locked = 0;
+        Set<String> usedCourseIds = new LinkedHashSet<>();
         for (Map<String, Object> card : activationCodes)
         {
             boolean hasOwner = str(card.get("ownerUserId")).length() > 0;
@@ -3517,6 +3709,10 @@ public class CourseApiController
             if ("used".equals(card.get("status")))
             {
                 used++;
+                if (str(card.get("courseId")).length() > 0)
+                {
+                    usedCourseIds.add(str(card.get("courseId")));
+                }
             }
             else if ("disabled".equals(card.get("status")))
             {
@@ -3533,6 +3729,7 @@ public class CourseApiController
             "assigned", assigned,
             "unassigned", unassigned,
             "used", used,
+            "usedCourseCount", usedCourseIds.size(),
             "assignedUnused", assignedUnused,
             "locked", locked,
             "available", activationCodes.size() - used - locked
@@ -3612,7 +3809,32 @@ public class CourseApiController
                 openCourses++;
             }
         }
-        return map("courseCount", openCourses, "attemptCount", userAttempts.size(), "averageScore", avg, "studyTime", studyDurationText(user, ""));
+        int ratingCount = 0;
+        for (Map<String, Object> rating : lessonRatings)
+        {
+            if (userId.equals(str(rating.get("userId"))))
+            {
+                ratingCount++;
+            }
+        }
+        int wrongCount = 0;
+        for (Map<String, Object> wrong : wrongQuestions)
+        {
+            if (userId.equals(str(wrong.get("userId"))))
+            {
+                wrongCount++;
+            }
+        }
+        int progress = averageProgressForUser(userId);
+        return map(
+            "courseCount", openCourses,
+            "attemptCount", userAttempts.size(),
+            "averageScore", avg,
+            "studyTime", studyDurationText(user, ""),
+            "ratingCount", ratingCount,
+            "wrongCount", wrongCount,
+            "progressText", progress > 0 ? progress + "%" : "暂无"
+        );
     }
 
     @SuppressWarnings("unchecked")
@@ -4152,6 +4374,7 @@ public class CourseApiController
             return;
         }
         copyEnrollmentField(enrollment, order, "studentName");
+        copyEnrollmentField(enrollment, order, "gender");
         copyEnrollmentField(enrollment, order, "recentExamScore");
         copyEnrollmentField(enrollment, order, "grade");
         copyEnrollmentField(enrollment, order, "schoolName");
@@ -4288,7 +4511,170 @@ public class CourseApiController
     {
         Map<String, Object> item = new LinkedHashMap<>(user);
         item.remove("password");
+        String userId = str(user.get("id"));
+        Map<String, Object> latestOrder = latestOpenOrderForUser(userId);
+        Map<String, Object> latestEnrollment = latestEnrollmentForUser(userId);
+        List<Map<String, Object>> activatedCourses = activatedCoursesForUser(userId);
+        List<String> names = new ArrayList<>();
+        for (Map<String, Object> course : activatedCourses)
+        {
+            String name = str(course.get("courseTitle"));
+            if (name.length() > 0)
+            {
+                names.add(name);
+            }
+        }
+        Map<String, Object> latest = latestOrder != null ? latestOrder : latestEnrollment;
+        item.put("activatedCourses", activatedCourses);
+        item.put("openCourseCount", activatedCourses.size());
+        item.put("openCourseNames", String.join("、", names));
+        item.put("openedAt", latestOrder == null ? "" : latestOrder.get("createdAt"));
+        item.put("openedCardCode", firstNonBlank(latestOrder == null ? "" : latestOrder.get("cardCode"), latestEnrollment == null ? "" : latestEnrollment.get("cardCode")));
+        item.put("expiresAt", firstNonBlank(latestOrder == null ? "" : latestOrder.get("expiresAt"), latestEnrollment == null ? "" : latestEnrollment.get("expiry")));
+        item.put("studentName", firstNonBlank(latest == null ? "" : latest.get("studentName"), user.get("studentName"), user.get("name")));
+        item.put("gender", firstNonBlank(latest == null ? "" : latest.get("gender"), user.get("gender")));
+        item.put("recentExamScore", firstNonBlank(latest == null ? "" : latest.get("recentExamScore"), user.get("recentExamScore")));
+        item.put("grade", firstNonBlank(latest == null ? "" : latest.get("grade"), user.get("grade")));
+        item.put("schoolName", firstNonBlank(latest == null ? "" : latest.get("schoolName"), user.get("schoolName")));
+        item.put("region", firstNonBlank(latest == null ? "" : latest.get("region"), user.get("region")));
+        item.put("studentStats", studentLearningSnapshot(userId));
+        item.put("accountTypeText", accountTypeTextForUser(user, activatedCourses.size()));
         return item;
+    }
+
+    private static String accountTypeTextForUser(Map<String, Object> user, int openCourseCount)
+    {
+        String role = str(user.get("role"));
+        if ("agency_admin".equals(role))
+        {
+            return "分机构账号";
+        }
+        if ("admin".equals(role))
+        {
+            return "管理员";
+        }
+        return openCourseCount > 0 ? "正式学员" : "试用学员";
+    }
+
+    private static Map<String, Object> latestOpenOrderForUser(String userId)
+    {
+        for (int i = orders.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> order = orders.get(i);
+            if (userId.equals(str(order.get("userId"))) && "activated".equals(order.get("status")) && !isExpired(str(order.get("expiresAt"))))
+            {
+                return order;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> latestEnrollmentForUser(String userId)
+    {
+        for (int i = enrollments.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> enrollment = enrollments.get(i);
+            if (userId.equals(str(enrollment.get("userId"))) && isEnrollmentOpen(enrollment))
+            {
+                return enrollment;
+            }
+        }
+        return null;
+    }
+
+    private static List<Map<String, Object>> activatedCoursesForUser(String userId)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> enrollment : enrollments)
+        {
+            if (!userId.equals(str(enrollment.get("userId"))) || !isEnrollmentOpen(enrollment))
+            {
+                continue;
+            }
+            String courseId = str(enrollment.get("courseId"));
+            Map<String, Object> course = findCourse(courseId);
+            int progress = averageProgressForCourse(userId, courseId);
+            result.add(map(
+                "courseId", courseId,
+                "courseTitle", course == null ? courseId : stripCourseYear(course.get("courseName")),
+                "expiresAt", enrollment.get("expiry"),
+                "progress", progress > 0 ? progress + "%" : "暂无",
+                "attempts", attemptCountForCourse(userId, courseId),
+                "averageScore", averageScoreForCourse(userId, courseId)
+            ));
+        }
+        return result;
+    }
+
+    private static int averageProgressForUser(String userId)
+    {
+        int total = 0;
+        int count = 0;
+        for (Map<String, Object> progress : lessonProgress.values())
+        {
+            if (userId.equals(str(progress.get("userId"))))
+            {
+                total += intValue(progress.get("percent"));
+                count++;
+            }
+        }
+        return count == 0 ? 0 : Math.round(total / (float) count);
+    }
+
+    private static int averageProgressForCourse(String userId, String courseId)
+    {
+        int total = 0;
+        int count = 0;
+        for (Map<String, Object> progress : lessonProgress.values())
+        {
+            if (userId.equals(str(progress.get("userId"))) && courseId.equals(str(progress.get("courseId"))))
+            {
+                total += intValue(progress.get("percent"));
+                count++;
+            }
+        }
+        return count == 0 ? 0 : Math.round(total / (float) count);
+    }
+
+    private static int attemptCountForCourse(String userId, String courseId)
+    {
+        int count = 0;
+        for (Map<String, Object> attempt : attempts)
+        {
+            if (userId.equals(str(attempt.get("userId"))) && (courseId.length() == 0 || courseId.equals(str(attempt.get("courseId")))))
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int averageScoreForCourse(String userId, String courseId)
+    {
+        int total = 0;
+        int count = 0;
+        for (Map<String, Object> attempt : attempts)
+        {
+            if (userId.equals(str(attempt.get("userId"))) && (courseId.length() == 0 || courseId.equals(str(attempt.get("courseId")))))
+            {
+                total += intValue(attempt.get("score"));
+                count++;
+            }
+        }
+        return count == 0 ? 0 : Math.round(total / (float) count);
+    }
+
+    private static String firstNonBlank(Object... values)
+    {
+        for (Object value : values)
+        {
+            String text = str(value).trim();
+            if (text.length() > 0)
+            {
+                return text;
+            }
+        }
+        return "";
     }
 
     private static Map<String, Object> findCourse(String id)
@@ -4465,6 +4851,10 @@ public class CourseApiController
         {
             course.put("quizzes", list(makeQuiz("入门测", "未学习", "去测评")));
         }
+        if (!course.containsKey("knowledgeQuizzes"))
+        {
+            course.put("knowledgeQuizzes", new ArrayList<Object>());
+        }
         int lessonCount = countUploadedCourseLessons(course);
         if (lessonCount > 0)
         {
@@ -4512,6 +4902,20 @@ public class CourseApiController
             return result;
         }
         return new ArrayList<>();
+    }
+
+    private static List<String> commaList(String value)
+    {
+        List<String> result = new ArrayList<>();
+        for (String item : str(value).split(","))
+        {
+            String text = item.trim();
+            if (text.length() > 0)
+            {
+                result.add(text);
+            }
+        }
+        return result;
     }
 
     private static String str(Object value)
