@@ -152,6 +152,7 @@ jobs:
           SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
           PACKAGE_PATH="ruoyi-admin/target/$APP_NAME"
+          ARCHIVE="backend-package.tgz"
 
           retry() {
             local max="$1"
@@ -175,12 +176,23 @@ jobs:
 
           PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
           PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
+          tar -C "$(dirname "$PACKAGE_PATH")" -czf "$ARCHIVE" "$APP_NAME"
+          ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          ARCHIVE_SIZE="$(stat -c%s "$ARCHIVE")"
+          du -h "$ARCHIVE"
           echo "Uploading backend package..."
-          retry 4 timeout 8m scp $SCP_OPTS "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+          retry 3 timeout 30m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$RELEASE_DIR/$ARCHIVE'" < "$ARCHIVE"
 
           echo "Installing backend package..."
-          timeout 3m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' ARCHIVE='$ARCHIVE' ARCHIVE_SHA='$ARCHIVE_SHA' ARCHIVE_SIZE='$ARCHIVE_SIZE' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
           set -euo pipefail
+          ACTUAL_ARCHIVE_SIZE="$(stat -c%s "$RELEASE_DIR/$ARCHIVE")"
+          ACTUAL_ARCHIVE_SHA="$(sha256sum "$RELEASE_DIR/$ARCHIVE" | awk '{print $1}')"
+          if [ "$ACTUAL_ARCHIVE_SIZE" != "$ARCHIVE_SIZE" ] || [ "$ACTUAL_ARCHIVE_SHA" != "$ARCHIVE_SHA" ]; then
+            echo "archive verification failed: size=$ACTUAL_ARCHIVE_SIZE sha=$ACTUAL_ARCHIVE_SHA"
+            exit 1
+          fi
+          tar -xzf "$RELEASE_DIR/$ARCHIVE" -C "$RELEASE_DIR"
           ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/$APP_NAME")"
           ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/$APP_NAME" | awk '{print $1}')"
           if [ "$ACTUAL_SIZE" != "$PACKAGE_SIZE" ] || [ "$ACTUAL_SHA" != "$PACKAGE_SHA" ]; then
