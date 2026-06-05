@@ -188,7 +188,7 @@ jobs:
 
           if command -v rsync >/dev/null 2>&1 && timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "command -v rsync >/dev/null 2>&1"; then
             echo "Uploading with rsync resumable transfer..."
-            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 --contimeout=60 -e "ssh $SSH_OPTS" "$ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$ARCHIVE"
+            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 -e "ssh $SSH_OPTS" "$ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$ARCHIVE"
           else
             echo "rsync unavailable, uploading verified 2MB chunks..."
             split -b 2M -d -a 4 "$ARCHIVE" "$ARCHIVE.part-"
