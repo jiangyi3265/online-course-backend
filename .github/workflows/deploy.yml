@@ -184,13 +184,31 @@ jobs:
           ARCHIVE_SIZE="$(stat -c%s "$ARCHIVE")"
           du -h "$ARCHIVE"
           echo "Uploading backend package..."
-          split -b 8M -d -a 3 "$ARCHIVE" "$ARCHIVE.part-"
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$ARCHIVE.part-'* '$RELEASE_DIR/$ARCHIVE'"
-          for part in "$ARCHIVE".part-*; do
-            echo "Uploading $part..."
-            retry 4 timeout 4m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$(basename "$part")"
-          done
-          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cd '$RELEASE_DIR' && cat '$ARCHIVE.part-'* > '$ARCHIVE' && rm -f '$ARCHIVE.part-'*"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$ARCHIVE'"
+
+          if command -v rsync >/dev/null 2>&1 && timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "command -v rsync >/dev/null 2>&1"; then
+            echo "Uploading with rsync resumable transfer..."
+            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 --contimeout=60 -e "ssh $SSH_OPTS" "$ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$ARCHIVE"
+          else
+            echo "rsync unavailable, uploading verified 2MB chunks..."
+            split -b 2M -d -a 4 "$ARCHIVE" "$ARCHIVE.part-"
+            for part in "$ARCHIVE".part-*; do
+              part_name="$(basename "$part")"
+              part_sha="$(sha256sum "$part" | awk '{print $1}')"
+              part_size="$(stat -c%s "$part")"
+              remote_part="$RELEASE_DIR/$part_name"
+
+              if timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$remote_part' && [ \"\$(stat -c%s '$remote_part')\" = '$part_size' ] && [ \"\$(sha256sum '$remote_part' | awk '{print \$1}')\" = '$part_sha' ]"; then
+                echo "Skipping verified $part_name"
+                continue
+              fi
+
+              echo "Uploading $part_name..."
+              retry 5 timeout 5m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$remote_part.tmp"
+              timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$remote_part.tmp' && [ \"\$(stat -c%s '$remote_part.tmp')\" = '$part_size' ] && [ \"\$(sha256sum '$remote_part.tmp' | awk '{print \$1}')\" = '$part_sha' ] && mv '$remote_part.tmp' '$remote_part'"
+            done
+            timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cd '$RELEASE_DIR' && cat '$ARCHIVE.part-'* > '$ARCHIVE' && rm -f '$ARCHIVE.part-'* '$ARCHIVE.part-'*.tmp"
+          fi
 
           echo "Installing backend package..."
           timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' ARCHIVE='$ARCHIVE' ARCHIVE_SHA='$ARCHIVE_SHA' ARCHIVE_SIZE='$ARCHIVE_SIZE' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
