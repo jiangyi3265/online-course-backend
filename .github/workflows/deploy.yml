@@ -184,7 +184,7 @@ jobs:
           ARCHIVE_SIZE="$(stat -c%s "$ARCHIVE")"
           du -h "$ARCHIVE"
           echo "Uploading backend package..."
-          retry 3 timeout 30m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$RELEASE_DIR/$ARCHIVE'" < "$ARCHIVE"
+          retry 4 timeout 12m scp $SCP_OPTS "$ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$ARCHIVE"
 
           echo "Installing backend package..."
           timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' ARCHIVE='$ARCHIVE' ARCHIVE_SHA='$ARCHIVE_SHA' ARCHIVE_SIZE='$ARCHIVE_SIZE' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
