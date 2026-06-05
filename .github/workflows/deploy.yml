@@ -179,45 +179,83 @@ jobs:
           PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
           PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
           du -h "$PACKAGE_PATH"
-          echo "Uploading backend package..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$APP_NAME' '$RELEASE_DIR/$APP_NAME.rsync-tmp'"
+          PATCH_ZIP="backend-class-patch.zip"
+          PATCH_MANIFEST="backend-class-patch.sha256"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import zipfile
 
-          if command -v rsync >/dev/null 2>&1 && timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "command -v rsync >/dev/null 2>&1"; then
-            echo "Uploading raw jar with rsync delta transfer..."
-            timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$APP_DIR/$APP_NAME' && cp '$APP_DIR/$APP_NAME' '$RELEASE_DIR/$APP_NAME.rsync-tmp' || true"
-            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 -e "ssh $SSH_OPTS" "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME.rsync-tmp"
-            timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$RELEASE_DIR/$APP_NAME.rsync-tmp' && [ \"\$(stat -c%s '$RELEASE_DIR/$APP_NAME.rsync-tmp')\" = '$PACKAGE_SIZE' ] && [ \"\$(sha256sum '$RELEASE_DIR/$APP_NAME.rsync-tmp' | awk '{print \$1}')\" = '$PACKAGE_SHA' ] && mv '$RELEASE_DIR/$APP_NAME.rsync-tmp' '$RELEASE_DIR/$APP_NAME'"
-          else
-            echo "rsync unavailable, uploading verified 2MB chunks..."
-            split -b 2M -d -a 4 "$PACKAGE_PATH" "$APP_NAME.part-"
-            retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$APP_NAME.part-'* '$RELEASE_DIR/$APP_NAME.part-'*.tmp"
-            for part in "$APP_NAME".part-*; do
-              part_name="$(basename "$part")"
-              part_sha="$(sha256sum "$part" | awk '{print $1}')"
-              part_size="$(stat -c%s "$part")"
-              remote_part="$RELEASE_DIR/$part_name"
+          class_root = Path("ruoyi-admin/target/classes")
+          source_dir = class_root / "com/ruoyi/web/controller/course"
+          classes = sorted(source_dir.glob("CourseApiController*.class"))
+          if not classes:
+              raise SystemExit("CourseApiController class files were not found")
 
-              if timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$remote_part' && [ \"\$(stat -c%s '$remote_part')\" = '$part_size' ] && [ \"\$(sha256sum '$remote_part' | awk '{print \$1}')\" = '$part_sha' ]"; then
-                echo "Skipping verified $part_name"
-                continue
-              fi
+          manifest = []
+          with zipfile.ZipFile("backend-class-patch.zip", "w", zipfile.ZIP_DEFLATED) as patch:
+              for path in classes:
+                  data = path.read_bytes()
+                  archive_name = "BOOT-INF/classes/" + path.relative_to(class_root).as_posix()
+                  patch.writestr(archive_name, data)
+                  manifest.append(f"{hashlib.sha256(data).hexdigest()}  {archive_name}\n")
 
-              echo "Uploading $part_name..."
-              retry 5 timeout 5m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$remote_part.tmp"
-              timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$remote_part.tmp' && [ \"\$(stat -c%s '$remote_part.tmp')\" = '$part_size' ] && [ \"\$(sha256sum '$remote_part.tmp' | awk '{print \$1}')\" = '$part_sha' ] && mv '$remote_part.tmp' '$remote_part'"
-            done
-            timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cd '$RELEASE_DIR' && cat '$APP_NAME.part-'* > '$APP_NAME' && rm -f '$APP_NAME.part-'* '$APP_NAME.part-'*.tmp"
-          fi
+          Path("backend-class-patch.sha256").write_text("".join(manifest), encoding="utf-8")
+          PY
 
-          echo "Installing backend package..."
-          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          du -h "$PATCH_ZIP"
+          echo "Uploading backend class patch..."
+          retry 5 timeout 2m scp $SCP_OPTS "$PATCH_ZIP" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$PATCH_ZIP"
+          retry 5 timeout 2m scp $SCP_OPTS "$PATCH_MANIFEST" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$PATCH_MANIFEST"
+
+          echo "Installing backend class patch..."
+          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PATCH_ZIP='$PATCH_ZIP' PATCH_MANIFEST='$PATCH_MANIFEST' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
-          ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/$APP_NAME")"
-          ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/$APP_NAME" | awk '{print $1}')"
-          if [ "$ACTUAL_SIZE" != "$PACKAGE_SIZE" ] || [ "$ACTUAL_SHA" != "$PACKAGE_SHA" ]; then
-            echo "package verification failed: size=$ACTUAL_SIZE sha=$ACTUAL_SHA"
+          if [ ! -f "$APP_DIR/$APP_NAME" ]; then
+            echo "existing backend package not found"
             exit 1
           fi
+
+          PATCH_ROOT="$RELEASE_DIR/class-patch"
+          rm -rf "$PATCH_ROOT"
+          mkdir -p "$PATCH_ROOT"
+          python3 - "$RELEASE_DIR/$PATCH_ZIP" "$PATCH_ROOT" <<'PY'
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(sys.argv[1]) as patch:
+              patch.extractall(sys.argv[2])
+          PY
+
+          JAR_TOOL=""
+          if [ -x "$JAVA_HOME/bin/jar" ]; then
+            JAR_TOOL="$JAVA_HOME/bin/jar"
+          elif command -v jar >/dev/null 2>&1; then
+            JAR_TOOL="$(command -v jar)"
+          else
+            echo "jar command not found"
+            exit 1
+          fi
+
+          cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME.before-patch"
+          cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME"
+          cd "$PATCH_ROOT"
+          "$JAR_TOOL" uf "$RELEASE_DIR/$APP_NAME" $(cut -d' ' -f3- "$RELEASE_DIR/$PATCH_MANIFEST")
+
+          python3 - "$RELEASE_DIR/$APP_NAME" "$RELEASE_DIR/$PATCH_MANIFEST" <<'PY'
+          import hashlib
+          import sys
+          import zipfile
+
+          jar_path, manifest_path = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(jar_path) as jar:
+              for line in open(manifest_path, encoding="utf-8"):
+                  expected, name = line.strip().split(None, 1)
+                  actual = hashlib.sha256(jar.read(name)).hexdigest()
+                  if actual != expected:
+                      raise SystemExit(f"patch verification failed for {name}")
+          PY
+
           cp "$RELEASE_DIR/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
           mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
           REMOTE
