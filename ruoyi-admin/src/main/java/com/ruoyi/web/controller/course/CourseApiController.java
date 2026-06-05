@@ -1586,7 +1586,7 @@ public class CourseApiController
         }
         user.put("role", role);
         user.put("organizationName", str(body.get("organizationName")).trim());
-        user.put("activationQuota", intValue(body.get("activationQuota")));
+        user.put("activationQuota", "agency_admin".equals(role) ? intValue(body.get("activationQuota")) : 0);
         putIfPresent(user, body, "name");
         putIfPresent(user, body, "phone");
         putIfPresent(user, body, "status");
@@ -1603,6 +1603,10 @@ public class CourseApiController
         if ("agency_admin".equals(role) && str(user.get("agencyId")).length() == 0)
         {
             user.put("agencyId", user.get("id"));
+        }
+        if (!"agency_admin".equals(role))
+        {
+            user.remove("agencyId");
         }
         logOperation("用户管理", user.get("name"), "", "编辑用户信息/角色：" + role, "已完成");
         persistData();
@@ -2105,12 +2109,14 @@ public class CourseApiController
                 "type", "privacy",
                 "title", "隐私政策",
                 "content", "请在后台配置隐私政策内容。",
+                "contentFormat", "html",
                 "updatedAt", now()
             ),
             "user", map(
                 "type", "user",
                 "title", "用户协议",
                 "content", "请在后台配置用户协议内容。",
+                "contentFormat", "html",
                 "updatedAt", now()
             )
         );
@@ -2177,6 +2183,7 @@ public class CourseApiController
             Map<String, Object> item = (Map<String, Object>) value;
             base.put("title", valueOrDefault(item.get("title"), base.get("title")));
             base.put("content", valueOrDefault(item.get("content"), base.get("content")));
+            base.put("contentFormat", valueOrDefault(item.get("contentFormat"), base.get("contentFormat")));
             base.put("updatedAt", valueOrDefault(item.get("updatedAt"), now()));
         }
         base.put("type", type);
@@ -2947,12 +2954,15 @@ public class CourseApiController
         Map<String, Object> answers = mapValue(payload.get("answers"));
         Map<String, Object> answerImages = mapValue(payload.get("answerImages"));
         Map<String, Object> skipped = mapValue(payload.get("skipped"));
+        Map<String, Object> noUploads = mapValue(payload.get("noUploads"));
+        Map<String, Object> selfReviews = mapValue(payload.get("selfReviews"));
         List<String> questionIds = stringList(payload.get("questionIds"));
         List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
         List<Map<String, Object>> source = questionIds.isEmpty() ? questionsFor(title) : questionsByIds(questionIds);
         int correct = 0;
         int gradable = 0;
         int manualReviewCount = 0;
+        double earned = 0d;
         List<Map<String, Object>> details = new ArrayList<>();
         int index = 0;
         for (Map<String, Object> q : source)
@@ -2961,10 +2971,14 @@ public class CourseApiController
             Object submitted = answers.get(q.get("id"));
             String questionType = questionType(q);
             boolean skippedQuestion = boolValue(skipped.get(questionId), false);
-            boolean manualReview = isSelfReviewQuestion(q) && !skippedQuestion;
-            boolean ok = !manualReview && !skippedQuestion && questionAnswerMatches(q, submitted);
+            boolean noUpload = boolValue(noUploads.get(questionId), false);
+            String selfReviewResult = selfReviews.containsKey(questionId) ? normalizeReviewResult(selfReviews.get(questionId), null) : "";
+            boolean reviewedManually = selfReviewResult.length() > 0;
+            boolean manualReview = isSelfReviewQuestion(q) && !skippedQuestion && !reviewedManually;
+            boolean partial = "partial".equals(selfReviewResult);
+            boolean ok = reviewedManually ? "correct".equals(selfReviewResult) : (!manualReview && !skippedQuestion && questionAnswerMatches(q, submitted));
             int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
-            String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : str(submitted).trim());
+            String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : firstNonBlank(str(submitted).trim(), noUpload ? "暂不上传" : ""));
             String answerText = correctAnswerText(q);
             String studentAnswerImageUrl = str(answerImages.get(questionId)).trim();
             if (manualReview)
@@ -2986,42 +3000,53 @@ public class CourseApiController
             if (ok)
             {
                 correct++;
+                earned += 1d;
             }
-            else if (!manualReview)
+            else
             {
-                Map<String, Object> wrong = map(
-                    "id", "wrong-" + System.currentTimeMillis() + "-" + index,
-                    "userId", user == null ? null : user.get("id"),
-                    "questionId", q.get("id"),
-                    "questionType", questionType,
-                    "sourceWrongId", sourceWrongId,
-                    "originType", originType,
-                    "courseId", payload.get("courseId"),
-                    "courseTitle", resolveCourseTitle(payload.get("courseId")),
-                    "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
-                    "title", title,
-                    "type", type,
-                    "sourceType", sourceLabel(type),
-                    "stem", q.get("stem"),
-                    "options", q.get("options"),
-                    "answer", q.get("answer"),
-                    "answerText", answerText,
-                    "selected", selected,
-                    "selectedText", selectedText,
-                    "studentAnswerImageUrl", studentAnswerImageUrl,
-                    "skipped", skippedQuestion,
-                    "analysis", q.get("analysis"),
-                    "analysisImageUrl", analysisImageUrl(q),
-                    "videoAnalysisUrl", analysisVideoUrl(q),
-                    "knowledge", q.get("knowledge"),
-                    "mastered", false,
-                    "retryCount", isWrongRetryType(type) ? 1 : 0,
-                    "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
-                    "updatedAt", now()
-                );
-                recordWrongQuestion(wrong, user);
+                if (partial)
+                {
+                    earned += 0.5d;
+                }
+                if (!manualReview)
+                {
+                    Map<String, Object> wrong = map(
+                        "id", "wrong-" + System.currentTimeMillis() + "-" + index,
+                        "userId", user == null ? null : user.get("id"),
+                        "questionId", q.get("id"),
+                        "questionType", questionType,
+                        "sourceWrongId", sourceWrongId,
+                        "originType", originType,
+                        "courseId", payload.get("courseId"),
+                        "courseTitle", resolveCourseTitle(payload.get("courseId")),
+                        "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
+                        "title", title,
+                        "type", type,
+                        "sourceType", sourceLabel(type),
+                        "stem", q.get("stem"),
+                        "options", q.get("options"),
+                        "answer", q.get("answer"),
+                        "answerText", answerText,
+                        "selected", selected,
+                        "selectedText", selectedText,
+                        "studentAnswerImageUrl", studentAnswerImageUrl,
+                        "skipped", skippedQuestion,
+                        "noUpload", noUpload,
+                        "reviewResult", reviewedManually ? selfReviewResult : "",
+                        "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
+                        "analysis", q.get("analysis"),
+                        "analysisImageUrl", analysisImageUrl(q),
+                        "videoAnalysisUrl", analysisVideoUrl(q),
+                        "knowledge", q.get("knowledge"),
+                        "mastered", false,
+                        "retryCount", isWrongRetryType(type) ? 1 : 0,
+                        "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
+                        "updatedAt", now()
+                    );
+                    recordWrongQuestion(wrong, user);
+                }
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (ok ? "correct" : "wrong"), "partialCredit", ok ? 1d : 0d, "skipped", skippedQuestion, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", selectedText);
@@ -3046,7 +3071,7 @@ public class CourseApiController
             "total", source.size(),
             "correct", correct,
             "manualReviewCount", manualReviewCount,
-            "score", gradable <= 0 ? 0 : Math.round(correct * 100f / gradable),
+            "score", gradable <= 0 ? 0 : Math.round((float) (earned * 100d / gradable)),
             "createdAt", now(),
             "details", details
         );
@@ -3207,10 +3232,17 @@ public class CourseApiController
         for (Map<String, Object> q : source)
         {
             Map<String, Object> item = new LinkedHashMap<>(q);
+            boolean manualReview = isSelfReviewQuestion(q);
             item.remove("answer");
             item.remove("answerText");
             item.remove("answerImageUrl");
             item.remove("acceptableAnswers");
+            item.put("manualReview", manualReview);
+            if (manualReview)
+            {
+                item.put("answerText", correctAnswerText(q));
+                item.put("answerImageUrl", str(q.get("answerImageUrl")));
+            }
             list.add(item);
         }
         return list;
@@ -4548,7 +4580,7 @@ public class CourseApiController
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> user : users)
         {
-            if ("agency_admin".equals(user.get("role")) || str(user.get("organizationName")).length() > 0)
+            if ("agency_admin".equals(str(user.get("role"))))
             {
                 result.add(agencySummaryData(str(user.get("id"))));
             }
@@ -4593,12 +4625,17 @@ public class CourseApiController
         int assignedUnused = 0;
         int locked = 0;
         int available = 0;
+        int activeUsed = 0;
+        int expired = 0;
+        int closedAuthorization = 0;
         Set<String> usedCourseIds = new LinkedHashSet<>();
         for (Map<String, Object> card : activationCodes)
         {
             boolean hasOwner = str(card.get("ownerUserId")).length() > 0;
             boolean cardUsed = "used".equals(card.get("status"));
             boolean cardLocked = activationCardLocked(card);
+            boolean cardExpired = activationCardExpired(card);
+            boolean cardClosed = activationAuthorizationClosed(card);
             if (hasOwner)
             {
                 assigned++;
@@ -4614,6 +4651,18 @@ public class CourseApiController
                 {
                     usedCourseIds.add(str(card.get("courseId")));
                 }
+            }
+            if (activationCardActiveUsed(card))
+            {
+                activeUsed++;
+            }
+            if (cardExpired)
+            {
+                expired++;
+            }
+            if (cardClosed)
+            {
+                closedAuthorization++;
             }
             if (cardLocked)
             {
@@ -4637,7 +4686,10 @@ public class CourseApiController
             "usedCourseCount", usedCourseIds.size(),
             "assignedUnused", assignedUnused,
             "locked", locked,
-            "available", available
+            "available", available,
+            "activeUsed", activeUsed,
+            "expired", expired,
+            "closedAuthorization", closedAuthorization
         );
     }
 
@@ -4657,6 +4709,9 @@ public class CourseApiController
         putIfPresent(card, card, "cardType");
         boolean assigned = str(card.get("ownerUserId")).length() > 0;
         card.put("assigned", assigned);
+        card.put("authorizationClosed", activationAuthorizationClosed(card));
+        card.put("expired", activationCardExpired(card));
+        card.put("activeUsed", activationCardActiveUsed(card));
         card.put("displayStatus", activationDisplayStatus(card));
     }
 
@@ -4681,8 +4736,37 @@ public class CourseApiController
         return card != null && (Boolean.TRUE.equals(card.get("locked")) || "disabled".equals(str(card.get("status"))));
     }
 
+    private static boolean activationAuthorizationClosed(Map<String, Object> card)
+    {
+        return card != null && Boolean.TRUE.equals(card.get("authorizationClosed"));
+    }
+
+    private static boolean activationCardExpired(Map<String, Object> card)
+    {
+        return card != null
+            && "used".equals(card.get("status"))
+            && !activationAuthorizationClosed(card)
+            && isExpired(str(card.get("expiresAt")));
+    }
+
+    private static boolean activationCardActiveUsed(Map<String, Object> card)
+    {
+        return card != null
+            && "used".equals(card.get("status"))
+            && !activationAuthorizationClosed(card)
+            && !activationCardExpired(card);
+    }
+
     private static String activationDisplayStatus(Map<String, Object> card)
     {
+        if (activationAuthorizationClosed(card))
+        {
+            return "已关闭授权";
+        }
+        if (activationCardExpired(card))
+        {
+            return "已过期";
+        }
         if (activationCardLocked(card))
         {
             return "已锁定";
