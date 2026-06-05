@@ -155,7 +155,6 @@ jobs:
           SCP_OPTS="-O -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=2 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
           RELEASE_DIR="$APP_DIR/releases/$GITHUB_SHA"
           PACKAGE_PATH="ruoyi-admin/target/$APP_NAME"
-          ARCHIVE="backend-package.tgz"
 
           retry() {
             local max="$1"
@@ -179,20 +178,20 @@ jobs:
 
           PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
           PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
-          tar -C "$(dirname "$PACKAGE_PATH")" -czf "$ARCHIVE" "$APP_NAME"
-          ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
-          ARCHIVE_SIZE="$(stat -c%s "$ARCHIVE")"
-          du -h "$ARCHIVE"
+          du -h "$PACKAGE_PATH"
           echo "Uploading backend package..."
-          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$ARCHIVE'"
+          retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$APP_NAME' '$RELEASE_DIR/$APP_NAME.rsync-tmp'"
 
           if command -v rsync >/dev/null 2>&1 && timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "command -v rsync >/dev/null 2>&1"; then
-            echo "Uploading with rsync resumable transfer..."
-            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 -e "ssh $SSH_OPTS" "$ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$ARCHIVE"
+            echo "Uploading raw jar with rsync delta transfer..."
+            timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$APP_DIR/$APP_NAME' && cp '$APP_DIR/$APP_NAME' '$RELEASE_DIR/$APP_NAME.rsync-tmp' || true"
+            retry 5 timeout 25m rsync -az --partial --inplace --timeout=120 -e "ssh $SSH_OPTS" "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME.rsync-tmp"
+            timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$RELEASE_DIR/$APP_NAME.rsync-tmp' && [ \"\$(stat -c%s '$RELEASE_DIR/$APP_NAME.rsync-tmp')\" = '$PACKAGE_SIZE' ] && [ \"\$(sha256sum '$RELEASE_DIR/$APP_NAME.rsync-tmp' | awk '{print \$1}')\" = '$PACKAGE_SHA' ] && mv '$RELEASE_DIR/$APP_NAME.rsync-tmp' '$RELEASE_DIR/$APP_NAME'"
           else
             echo "rsync unavailable, uploading verified 2MB chunks..."
-            split -b 2M -d -a 4 "$ARCHIVE" "$ARCHIVE.part-"
-            for part in "$ARCHIVE".part-*; do
+            split -b 2M -d -a 4 "$PACKAGE_PATH" "$APP_NAME.part-"
+            retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -f '$RELEASE_DIR/$APP_NAME.part-'* '$RELEASE_DIR/$APP_NAME.part-'*.tmp"
+            for part in "$APP_NAME".part-*; do
               part_name="$(basename "$part")"
               part_sha="$(sha256sum "$part" | awk '{print $1}')"
               part_size="$(stat -c%s "$part")"
@@ -207,19 +206,12 @@ jobs:
               retry 5 timeout 5m scp $SCP_OPTS "$part" "$DEPLOY_USER@$DEPLOY_HOST:$remote_part.tmp"
               timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$remote_part.tmp' && [ \"\$(stat -c%s '$remote_part.tmp')\" = '$part_size' ] && [ \"\$(sha256sum '$remote_part.tmp' | awk '{print \$1}')\" = '$part_sha' ] && mv '$remote_part.tmp' '$remote_part'"
             done
-            timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cd '$RELEASE_DIR' && cat '$ARCHIVE.part-'* > '$ARCHIVE' && rm -f '$ARCHIVE.part-'* '$ARCHIVE.part-'*.tmp"
+            timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cd '$RELEASE_DIR' && cat '$APP_NAME.part-'* > '$APP_NAME' && rm -f '$APP_NAME.part-'* '$APP_NAME.part-'*.tmp"
           fi
 
           echo "Installing backend package..."
-          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' ARCHIVE='$ARCHIVE' ARCHIVE_SHA='$ARCHIVE_SHA' ARCHIVE_SIZE='$ARCHIVE_SIZE' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
           set -euo pipefail
-          ACTUAL_ARCHIVE_SIZE="$(stat -c%s "$RELEASE_DIR/$ARCHIVE")"
-          ACTUAL_ARCHIVE_SHA="$(sha256sum "$RELEASE_DIR/$ARCHIVE" | awk '{print $1}')"
-          if [ "$ACTUAL_ARCHIVE_SIZE" != "$ARCHIVE_SIZE" ] || [ "$ACTUAL_ARCHIVE_SHA" != "$ARCHIVE_SHA" ]; then
-            echo "archive verification failed: size=$ACTUAL_ARCHIVE_SIZE sha=$ACTUAL_ARCHIVE_SHA"
-            exit 1
-          fi
-          tar -xzf "$RELEASE_DIR/$ARCHIVE" -C "$RELEASE_DIR"
           ACTUAL_SIZE="$(stat -c%s "$RELEASE_DIR/$APP_NAME")"
           ACTUAL_SHA="$(sha256sum "$RELEASE_DIR/$APP_NAME" | awk '{print $1}')"
           if [ "$ACTUAL_SIZE" != "$PACKAGE_SIZE" ] || [ "$ACTUAL_SHA" != "$PACKAGE_SHA" ]; then
