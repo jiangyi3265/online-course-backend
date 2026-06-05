@@ -16,8 +16,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,7 +32,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ruoyi.common.config.RuoYiConfig;
 import com.ruoyi.common.core.domain.AjaxResult;
+import com.ruoyi.common.utils.file.FileUploadUtils;
+import com.ruoyi.common.utils.file.FileUtils;
+import com.ruoyi.framework.config.ServerConfig;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * 网课三端联调用接口。
@@ -73,6 +80,9 @@ public class CourseApiController
 
     @Value("${ruoyi.profile:}")
     private String profilePath;
+
+    @Autowired
+    private ServerConfig serverConfig;
 
     static
     {
@@ -211,7 +221,7 @@ public class CourseApiController
                 "phone", phone,
                 "password", password,
                 "name", name,
-                "id", "u" + System.currentTimeMillis(),
+                "id", generateUserId(),
                 "tenantId", 52,
                 "role", "student",
                 "status", "active",
@@ -679,12 +689,83 @@ public class CourseApiController
         return AjaxResult.success(map("title", title, "type", type, "courseId", scopedCourseId(courseId), "questions", publicQuestions(source)));
     }
 
+    @PostMapping("/app/upload")
+    public AjaxResult appUpload(MultipartFile file)
+    {
+        try
+        {
+            if (file == null || file.isEmpty())
+            {
+                return AjaxResult.error("请选择要上传的图片");
+            }
+            String fileName = FileUploadUtils.upload(RuoYiConfig.getUploadPath(), file);
+            String url = serverConfig.getUrl() + fileName;
+            return AjaxResult.success(map(
+                "url", url,
+                "fileName", fileName,
+                "newFileName", FileUtils.getName(fileName),
+                "originalFilename", file.getOriginalFilename()
+            ));
+        }
+        catch (Exception e)
+        {
+            return AjaxResult.error(e.getMessage());
+        }
+    }
+
     @PostMapping("/app/practice/submit")
     public AjaxResult submitPractice(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
         Map<String, Object> result = grade(body, currentUser(request));
         persistData();
         return AjaxResult.success(result);
+    }
+
+    @PostMapping("/app/practice/self-review")
+    public AjaxResult selfReviewPractice(@RequestBody Map<String, Object> body, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        String attemptId = str(body.get("attemptId"));
+        String questionId = str(body.get("questionId"));
+        Map<String, Object> attempt = findById(attempts, attemptId);
+        if (attempt == null || !sameUser(attempt, user))
+        {
+            return AjaxResult.error("答题记录不存在");
+        }
+        Map<String, Object> detail = null;
+        for (Map<String, Object> item : mapList(attempt.get("details")))
+        {
+            if (questionId.equals(str(item.get("id"))))
+            {
+                detail = item;
+                break;
+            }
+        }
+        if (detail == null)
+        {
+            return AjaxResult.error("题目记录不存在");
+        }
+        String reviewResult = normalizeReviewResult(body.get("reviewResult"), body.get("correct"));
+        boolean correct = "correct".equals(reviewResult);
+        boolean partial = "partial".equals(reviewResult);
+        detail.put("manualReview", false);
+        detail.put("selfReviewed", true);
+        detail.put("correct", correct);
+        detail.put("partialCredit", partial ? 0.5d : (correct ? 1d : 0d));
+        detail.put("reviewedAt", now());
+        detail.put("reviewResult", reviewResult);
+        if (correct)
+        {
+            markWrongQuestionMastered(user, str(attempt.get("courseId")), questionId);
+        }
+        else
+        {
+            Map<String, Object> wrong = wrongFromReviewedDetail(attempt, detail, user);
+            recordWrongQuestion(wrong, user);
+        }
+        recalculateAttemptScore(attempt);
+        persistData();
+        return AjaxResult.success(map("attempt", attempt, "detail", detail));
     }
 
     @GetMapping("/app/quiz")
@@ -891,7 +972,7 @@ public class CourseApiController
         }
         Object submitted = body.containsKey("answer") ? body.get("answer") : body.get("selected");
         String questionType = questionType(question);
-        boolean manualReview = isSubjectiveQuestion(question);
+        boolean manualReview = isSelfReviewQuestion(question);
         int selected = isChoiceQuestion(question) ? intValue(submitted) : -1;
         String selectedText = isChoiceQuestion(question) ? optionText(question, selected) : str(submitted).trim();
         String answerText = correctAnswerText(question);
@@ -906,7 +987,7 @@ public class CourseApiController
             "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "correct", correct, "manualReview", manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct && !manualReview)
@@ -1238,11 +1319,23 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码无效");
         }
-        if (!"available".equals(card.get("status")))
+        if (!"available".equals(card.get("status")) || activationCardLocked(card))
         {
             return AjaxResult.error("激活码已使用或已关闭");
         }
-        String courseId = str(card.get("courseId"));
+        String courseId = str(body.get("courseId")).trim();
+        if (courseId.length() == 0)
+        {
+            courseId = str(card.get("courseId")).trim();
+        }
+        if (courseId.length() == 0)
+        {
+            return AjaxResult.error("请选择要开通的课程");
+        }
+        if (findCourse(courseId) == null)
+        {
+            return AjaxResult.error("课程不存在");
+        }
         String expiry = expiryForCard(card);
         Map<String, Object> user = currentUser(request);
         Map<String, Object> order = createOrderRecord(courseId, user, "激活码开通", code, expiry, str(card.get("cardType")));
@@ -1256,6 +1349,9 @@ public class CourseApiController
         order.put("cardType", card.get("cardType"));
         updateEnrollmentFromOrder(order);
         card.put("status", "used");
+        card.put("locked", false);
+        card.put("authorizationClosed", false);
+        card.put("courseId", courseId);
         card.put("usedByUserId", user == null ? null : user.get("id"));
         card.put("usedByName", user == null ? "" : user.get("name"));
         card.put("studentName", studentName);
@@ -1500,6 +1596,10 @@ public class CourseApiController
         putIfPresent(user, body, "region");
         putIfPresent(user, body, "recentExamScore");
         putIfPresent(user, body, "remark");
+        if (body.containsKey("expiresAt"))
+        {
+            updateUserCourseExpiry(id, str(body.get("expiresAt")).trim());
+        }
         if ("agency_admin".equals(role) && str(user.get("agencyId")).length() == 0)
         {
             user.put("agencyId", user.get("id"));
@@ -1524,15 +1624,24 @@ public class CourseApiController
         {
             code = generateCardCode(str(body.get("cardType")));
         }
+        else if (!isValidGeneratedCardCode(code))
+        {
+            return AjaxResult.error("激活码需为9位以上小写字母和数字组合");
+        }
         if (findActivationCode(code) != null)
         {
             return AjaxResult.error("激活码已存在");
         }
+        String ownerUserId = str(body.get("ownerUserId")).trim();
+        if (ownerUserId.length() > 0 && findById(users, ownerUserId) == null)
+        {
+            return AjaxResult.error("归属账号不存在");
+        }
         Map<String, Object> card = activationCode(
             code,
-            str(body.get("courseId")).length() == 0 ? "gk-math-full" : str(body.get("courseId")),
+            str(body.get("courseId")).trim(),
             str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")),
-            str(body.get("ownerUserId"))
+            ownerUserId
         );
         card.put("remark", str(body.get("remark")));
         activationCodes.add(card);
@@ -1549,15 +1658,61 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码不存在");
         }
+        normalizeActivationCardState(card);
+        boolean used = "used".equals(card.get("status"));
+        if (body.containsKey("locked"))
+        {
+            card.put("locked", boolValue(body.get("locked"), activationCardLocked(card)));
+        }
         String status = str(body.get("status")).trim();
         if (status.length() > 0)
         {
-            card.put("status", status);
+            if ("disabled".equals(status))
+            {
+                card.put("locked", true);
+            }
+            else if ("available".equals(status) && !used)
+            {
+                card.put("status", "available");
+                card.put("locked", false);
+            }
+            else if ("used".equals(status) && used)
+            {
+                card.put("locked", false);
+            }
         }
-        putIfPresent(card, body, "ownerUserId");
-        putIfPresent(card, body, "courseId");
-        putIfPresent(card, body, "cardType");
-        putIfPresent(card, body, "remark");
+        if (used)
+        {
+            if (body.containsKey("ownerUserId") || body.containsKey("courseId") || body.containsKey("cardType") || body.containsKey("remark"))
+            {
+                return AjaxResult.error("已使用激活码只能锁定/解锁或关闭课程授权");
+            }
+        }
+        else
+        {
+            if (body.containsKey("ownerUserId"))
+            {
+                String currentOwner = str(card.get("ownerUserId")).trim();
+                String nextOwner = str(body.get("ownerUserId")).trim();
+                if (nextOwner.length() > 0)
+                {
+                    Map<String, Object> owner = findById(users, nextOwner);
+                    if (owner == null)
+                    {
+                        return AjaxResult.error("归属账号不存在");
+                    }
+                    if (currentOwner.length() > 0 && !currentOwner.equals(nextOwner))
+                    {
+                        return AjaxResult.error("已分配激活码不能重新分配，请先取消分配");
+                    }
+                }
+                putIfPresent(card, body, "ownerUserId");
+            }
+            putIfPresent(card, body, "courseId");
+            putIfPresent(card, body, "cardType");
+            putIfPresent(card, body, "remark");
+        }
+        enrichActivationCard(card);
         card.put("updatedAt", now());
         logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "编辑激活码：" + card.get("code"), str(card.get("status")));
         persistData();
@@ -1572,6 +1727,7 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码不存在");
         }
+        normalizeActivationCardState(card);
         if ("used".equals(card.get("status")))
         {
             return AjaxResult.error("已使用激活码不能删除");
@@ -1580,6 +1736,34 @@ public class CourseApiController
         logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "删除激活码：" + card.get("code"), "已完成");
         persistData();
         return AjaxResult.success();
+    }
+
+    @PutMapping("/admin/activation-codes/{id}/close-authorization")
+    public AjaxResult closeActivationCodeAuthorization(@PathVariable String id)
+    {
+        Map<String, Object> card = findById(activationCodes, id);
+        if (card == null)
+        {
+            return AjaxResult.error("激活码不存在");
+        }
+        normalizeActivationCardState(card);
+        if (!"used".equals(card.get("status")))
+        {
+            return AjaxResult.error("未使用激活码没有课程授权可关闭");
+        }
+        Map<String, Object> order = latestOrderForCard(str(card.get("code")));
+        if (order == null)
+        {
+            return AjaxResult.error("未找到对应开通记录");
+        }
+        order.put("status", "closed");
+        order.put("closedAt", now());
+        closeEnrollmentForOrder(order);
+        card.put("authorizationClosed", true);
+        card.put("authorizationClosedAt", now());
+        logOperation("激活码管理", card.get("usedByName"), card.get("courseTitle"), "关闭激活码课程授权：" + card.get("code"), "已关闭");
+        persistData();
+        return AjaxResult.success(card);
     }
 
     @PostMapping("/admin/activate")
@@ -1605,6 +1789,10 @@ public class CourseApiController
         {
             courseId = str(card.get("courseId"));
         }
+        if (courseId.length() == 0)
+        {
+            return AjaxResult.error("请选择要开通的课程");
+        }
         if (findCourse(courseId) == null)
         {
             return AjaxResult.error("课程不存在");
@@ -1621,6 +1809,8 @@ public class CourseApiController
         order.put("cardType", card.get("cardType"));
         updateEnrollmentFromOrder(order);
         card.put("status", "used");
+        card.put("locked", false);
+        card.put("authorizationClosed", false);
         card.put("usedByUserId", user.get("id"));
         card.put("usedByName", user.get("name"));
         card.put("courseId", courseId);
@@ -2755,6 +2945,8 @@ public class CourseApiController
         String courseId = scopedCourseId(payload.get("courseId"));
         payload.put("courseId", courseId);
         Map<String, Object> answers = mapValue(payload.get("answers"));
+        Map<String, Object> answerImages = mapValue(payload.get("answerImages"));
+        Map<String, Object> skipped = mapValue(payload.get("skipped"));
         List<String> questionIds = stringList(payload.get("questionIds"));
         List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
         List<Map<String, Object>> source = questionIds.isEmpty() ? questionsFor(title) : questionsByIds(questionIds);
@@ -2765,13 +2957,16 @@ public class CourseApiController
         int index = 0;
         for (Map<String, Object> q : source)
         {
+            String questionId = str(q.get("id"));
             Object submitted = answers.get(q.get("id"));
             String questionType = questionType(q);
-            boolean manualReview = isSubjectiveQuestion(q);
-            boolean ok = !manualReview && questionAnswerMatches(q, submitted);
+            boolean skippedQuestion = boolValue(skipped.get(questionId), false);
+            boolean manualReview = isSelfReviewQuestion(q) && !skippedQuestion;
+            boolean ok = !manualReview && !skippedQuestion && questionAnswerMatches(q, submitted);
             int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
-            String selectedText = isChoiceQuestion(q) ? optionText(q, selected) : str(submitted).trim();
+            String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : str(submitted).trim());
             String answerText = correctAnswerText(q);
+            String studentAnswerImageUrl = str(answerImages.get(questionId)).trim();
             if (manualReview)
             {
                 manualReviewCount++;
@@ -2813,6 +3008,8 @@ public class CourseApiController
                     "answerText", answerText,
                     "selected", selected,
                     "selectedText", selectedText,
+                    "studentAnswerImageUrl", studentAnswerImageUrl,
+                    "skipped", skippedQuestion,
                     "analysis", q.get("analysis"),
                     "analysisImageUrl", analysisImageUrl(q),
                     "videoAnalysisUrl", analysisVideoUrl(q),
@@ -2824,7 +3021,7 @@ public class CourseApiController
                 );
                 recordWrongQuestion(wrong, user);
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "correct", ok, "manualReview", manualReview, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (ok ? "correct" : "wrong"), "partialCredit", ok ? 1d : 0d, "skipped", skippedQuestion, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", selectedText);
@@ -3012,6 +3209,7 @@ public class CourseApiController
             Map<String, Object> item = new LinkedHashMap<>(q);
             item.remove("answer");
             item.remove("answerText");
+            item.remove("answerImageUrl");
             item.remove("acceptableAnswers");
             list.add(item);
         }
@@ -3035,6 +3233,11 @@ public class CourseApiController
         if (videoUrl.length() > 0)
         {
             question.put("videoAnalysisUrl", videoUrl);
+        }
+        String answerImageUrl = str(question.get("answerImageUrl")).trim();
+        if (answerImageUrl.length() > 0)
+        {
+            question.put("answerImageUrl", answerImageUrl);
         }
         if (isChoiceQuestion(question))
         {
@@ -3091,6 +3294,11 @@ public class CourseApiController
     private static boolean isSubjectiveQuestion(Map<String, Object> question)
     {
         return "subjective".equals(questionType(question));
+    }
+
+    private static boolean isSelfReviewQuestion(Map<String, Object> question)
+    {
+        return !isChoiceQuestion(question);
     }
 
     private static boolean questionAnswerMatches(Map<String, Object> question, Object submitted)
@@ -3178,6 +3386,108 @@ public class CourseApiController
         }
         mergeWrongQuestion(existing, wrong, true);
         return existing;
+    }
+
+    private static Map<String, Object> wrongFromReviewedDetail(Map<String, Object> attempt, Map<String, Object> detail, Map<String, Object> user)
+    {
+        String questionId = str(detail.get("id"));
+        Map<String, Object> question = findById(questions, questionId);
+        String questionType = question == null ? str(detail.get("questionType")) : questionType(question);
+        return map(
+            "id", "wrong-" + System.currentTimeMillis() + "-" + questionId,
+            "userId", user == null ? null : user.get("id"),
+            "questionId", questionId,
+            "questionType", questionType,
+            "courseId", attempt.get("courseId"),
+            "courseTitle", attempt.get("courseTitle"),
+            "subjectTitle", attempt.get("subjectTitle"),
+            "title", attempt.get("title"),
+            "type", attempt.get("type"),
+            "sourceType", attempt.get("sourceType"),
+            "stem", detail.get("stem"),
+            "options", question == null ? new ArrayList<Object>() : question.get("options"),
+            "answer", detail.get("answer"),
+            "answerText", detail.get("answerText"),
+            "answerImageUrl", detail.get("answerImageUrl"),
+            "selected", detail.get("selected"),
+            "selectedText", detail.get("selectedText"),
+            "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
+            "reviewResult", detail.get("reviewResult"),
+            "partialCredit", detail.get("partialCredit"),
+            "analysis", detail.get("analysis"),
+            "analysisImageUrl", detail.get("analysisImageUrl"),
+            "videoAnalysisUrl", detail.get("videoAnalysisUrl"),
+            "knowledge", question == null ? "" : question.get("knowledge"),
+            "mastered", false,
+            "updatedAt", now()
+        );
+    }
+
+    private static String normalizeReviewResult(Object reviewResultValue, Object correctValue)
+    {
+        String reviewResult = str(reviewResultValue).trim().toLowerCase();
+        if ("correct".equals(reviewResult) || "right".equals(reviewResult) || "ok".equals(reviewResult))
+        {
+            return "correct";
+        }
+        if ("partial".equals(reviewResult) || "half".equals(reviewResult) || "half_correct".equals(reviewResult))
+        {
+            return "partial";
+        }
+        if ("wrong".equals(reviewResult) || "incorrect".equals(reviewResult) || "bad".equals(reviewResult))
+        {
+            return "wrong";
+        }
+        return boolValue(correctValue, false) ? "correct" : "wrong";
+    }
+
+    private static void markWrongQuestionMastered(Map<String, Object> user, String courseId, String questionId)
+    {
+        Map<String, Object> question = findById(questions, questionId);
+        String questionKey = question == null ? questionId : questionFingerprint(question);
+        for (Map<String, Object> wrong : wrongQuestions)
+        {
+            if (sameUser(wrong, user)
+                && scopedCourseId(courseId).equals(scopedCourseId(wrong.get("courseId")))
+                && (questionId.equals(str(wrong.get("questionId"))) || questionKey.equals(ensureWrongQuestionKey(wrong))))
+            {
+                wrong.put("mastered", true);
+                wrong.put("updatedAt", now());
+            }
+        }
+    }
+
+    private static void recalculateAttemptScore(Map<String, Object> attempt)
+    {
+        int correct = 0;
+        int pending = 0;
+        int total = 0;
+        int manualReviewCount = 0;
+        double earned = 0d;
+        for (Map<String, Object> detail : mapList(attempt.get("details")))
+        {
+            total++;
+            boolean manualReview = boolValue(detail.get("manualReview"), false);
+            if (manualReview)
+            {
+                manualReviewCount++;
+                pending++;
+            }
+            if (boolValue(detail.get("correct"), false))
+            {
+                correct++;
+                earned += 1d;
+            }
+            else if ("partial".equals(str(detail.get("reviewResult"))))
+            {
+                earned += 0.5d;
+            }
+        }
+        int gradable = Math.max(0, total - pending);
+        attempt.put("total", total);
+        attempt.put("correct", correct);
+        attempt.put("manualReviewCount", manualReviewCount);
+        attempt.put("score", gradable <= 0 ? 0 : Math.round((float) (earned * 100d / gradable)));
     }
 
     private static Map<String, Object> findWrongByQuestion(Map<String, Object> user, String courseId, String questionKey)
@@ -3745,6 +4055,7 @@ public class CourseApiController
             Map<String, Object> item = new LinkedHashMap<>(question);
             item.remove("answer");
             item.remove("answerText");
+            item.remove("answerImageUrl");
             item.remove("acceptableAnswers");
             return item;
         }
@@ -3774,6 +4085,11 @@ public class CourseApiController
         {
             Map<String, Object> wrong = findById(wrongQuestions, sourceWrongIds.get(i));
             if (wrong == null || !sameUser(wrong, user) || !expectedCourseId.equals(scopedCourseId(wrong.get("courseId"))))
+            {
+                continue;
+            }
+            boolean pendingReview = i < details.size() && boolValue(details.get(i).get("manualReview"), false);
+            if (pendingReview)
             {
                 continue;
             }
@@ -4123,11 +4439,11 @@ public class CourseApiController
                     "courseTitle", card.get("courseTitle")
                 ));
             }
-            else if ("disabled".equals(card.get("status")))
+            if (activationCardLocked(card))
             {
                 locked++;
             }
-            else
+            if (!"used".equals(card.get("status")))
             {
                 assignedUnused++;
             }
@@ -4276,10 +4592,13 @@ public class CourseApiController
         int used = 0;
         int assignedUnused = 0;
         int locked = 0;
+        int available = 0;
         Set<String> usedCourseIds = new LinkedHashSet<>();
         for (Map<String, Object> card : activationCodes)
         {
             boolean hasOwner = str(card.get("ownerUserId")).length() > 0;
+            boolean cardUsed = "used".equals(card.get("status"));
+            boolean cardLocked = activationCardLocked(card);
             if (hasOwner)
             {
                 assigned++;
@@ -4288,7 +4607,7 @@ public class CourseApiController
             {
                 unassigned++;
             }
-            if ("used".equals(card.get("status")))
+            if (cardUsed)
             {
                 used++;
                 if (str(card.get("courseId")).length() > 0)
@@ -4296,13 +4615,17 @@ public class CourseApiController
                     usedCourseIds.add(str(card.get("courseId")));
                 }
             }
-            else if ("disabled".equals(card.get("status")))
+            if (cardLocked)
             {
                 locked++;
             }
-            else if (hasOwner)
+            if (hasOwner && !cardUsed)
             {
                 assignedUnused++;
+            }
+            if (!cardUsed && !cardLocked)
+            {
+                available++;
             }
         }
         return map(
@@ -4314,7 +4637,7 @@ public class CourseApiController
             "usedCourseCount", usedCourseIds.size(),
             "assignedUnused", assignedUnused,
             "locked", locked,
-            "available", activationCodes.size() - used - locked
+            "available", available
         );
     }
 
@@ -4322,10 +4645,57 @@ public class CourseApiController
     {
         for (Map<String, Object> card : activationCodes)
         {
-            putIfPresent(card, card, "courseId");
-            putIfPresent(card, card, "ownerUserId");
-            putIfPresent(card, card, "cardType");
+            enrichActivationCard(card);
         }
+    }
+
+    private static void enrichActivationCard(Map<String, Object> card)
+    {
+        normalizeActivationCardState(card);
+        putIfPresent(card, card, "courseId");
+        putIfPresent(card, card, "ownerUserId");
+        putIfPresent(card, card, "cardType");
+        boolean assigned = str(card.get("ownerUserId")).length() > 0;
+        card.put("assigned", assigned);
+        card.put("displayStatus", activationDisplayStatus(card));
+    }
+
+    private static void normalizeActivationCardState(Map<String, Object> card)
+    {
+        boolean locked = activationCardLocked(card);
+        String status = str(card.get("status")).trim();
+        if ("disabled".equals(status))
+        {
+            status = str(card.get("usedByUserId")).length() > 0 || str(card.get("activatedAt")).length() > 0 ? "used" : "available";
+        }
+        if (!"used".equals(status))
+        {
+            status = str(card.get("usedByUserId")).length() > 0 || str(card.get("activatedAt")).length() > 0 ? "used" : "available";
+        }
+        card.put("status", status);
+        card.put("locked", locked);
+    }
+
+    private static boolean activationCardLocked(Map<String, Object> card)
+    {
+        return card != null && (Boolean.TRUE.equals(card.get("locked")) || "disabled".equals(str(card.get("status"))));
+    }
+
+    private static String activationDisplayStatus(Map<String, Object> card)
+    {
+        if (activationCardLocked(card))
+        {
+            return "已锁定";
+        }
+        if ("used".equals(card.get("status")))
+        {
+            return "已使用";
+        }
+        if (str(card.get("ownerUserId")).length() > 0)
+        {
+            return "已分配";
+        }
+        return "未分配";
     }
 
     private static Map<String, Object> studentCourseSummary(String userId)
@@ -4483,9 +4853,11 @@ public class CourseApiController
             "totalCounts", totalCounts,
             "groups", groups,
             "groupBasis", "activationRecentExamScore",
+            "courses", courseRatingBreakdown(),
             "subjects", ratingBreakdown("subjectTitle"),
             "chapters", ratingBreakdown("chapterTitle"),
-            "lessons", ratingBreakdown("lessonTitle")
+            "lessons", ratingBreakdown("lessonTitle"),
+            "details", ratingLessonDetails()
         );
     }
 
@@ -4660,6 +5032,152 @@ public class CourseApiController
         return result;
     }
 
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> courseRatingBreakdown()
+    {
+        Map<String, Map<String, Object>> buckets = new LinkedHashMap<>();
+        for (Map<String, Object> course : courses)
+        {
+            if (!"full".equals(str(course.get("kind"))))
+            {
+                continue;
+            }
+            String id = str(course.get("id"));
+            buckets.put(id, map(
+                "id", id,
+                "name", stripCourseYear(course.get("courseName")),
+                "total", 0,
+                "average", "0.0",
+                "counts", countsMap(new int[]{0, 0, 0, 0, 0})
+            ));
+        }
+        for (Map<String, Object> item : lessonRatings)
+        {
+            int rating = intValue(item.get("rating"));
+            if (rating < 1 || rating > 5)
+            {
+                continue;
+            }
+            String courseId = str(item.get("courseId"));
+            String key = courseId.length() > 0 ? courseId : str(item.get("courseTitle"));
+            if (key.length() == 0)
+            {
+                key = "未归类";
+            }
+            Map<String, Object> bucket = buckets.get(key);
+            if (bucket == null)
+            {
+                bucket = map(
+                    "id", key,
+                    "name", firstNonBlank(item.get("courseTitle"), resolveCourseTitle(courseId), "未归类"),
+                    "total", 0,
+                    "average", "0.0",
+                    "counts", countsMap(new int[]{0, 0, 0, 0, 0})
+                );
+                buckets.put(key, bucket);
+            }
+            addRatingToBucket(bucket, rating);
+        }
+        List<Map<String, Object>> result = new ArrayList<>(buckets.values());
+        for (Map<String, Object> item : result)
+        {
+            item.remove("weighted");
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> ratingLessonDetails()
+    {
+        Map<String, Map<String, Object>> buckets = new LinkedHashMap<>();
+        for (Map<String, Object> item : lessonRatings)
+        {
+            int rating = intValue(item.get("rating"));
+            if (rating < 1 || rating > 5)
+            {
+                continue;
+            }
+            String lessonId = str(item.get("lessonId"));
+            if (lessonId.length() == 0)
+            {
+                lessonId = firstNonBlank(item.get("courseId"), item.get("lessonTitle"), "未归类") + "-" + buckets.size();
+            }
+            Map<String, Object> bucket = buckets.get(lessonId);
+            if (bucket == null)
+            {
+                bucket = map(
+                    "id", lessonId,
+                    "lessonId", lessonId,
+                    "name", firstNonBlank(item.get("lessonTitle"), lessonId),
+                    "lessonTitle", firstNonBlank(item.get("lessonTitle"), lessonId),
+                    "courseId", item.get("courseId"),
+                    "courseTitle", firstNonBlank(item.get("courseTitle"), resolveCourseTitle(item.get("courseId")), "未归类"),
+                    "chapterTitle", firstNonBlank(item.get("chapterTitle"), "未归类"),
+                    "total", 0,
+                    "average", "0.0",
+                    "counts", countsMap(new int[]{0, 0, 0, 0, 0}),
+                    "scoreCounts", new LinkedHashMap<String, Integer>()
+                );
+                Map<String, Integer> scoreCounts = (Map<String, Integer>) bucket.get("scoreCounts");
+                for (Map<String, Object> group : scoreGroups())
+                {
+                    scoreCounts.put(str(group.get("range")), 0);
+                }
+                buckets.put(lessonId, bucket);
+            }
+            addRatingToBucket(bucket, rating);
+            String range = scoreRange(recentExamScoreForRating(item));
+            Map<String, Integer> scoreCounts = (Map<String, Integer>) bucket.get("scoreCounts");
+            scoreCounts.put(range, scoreCounts.getOrDefault(range, 0) + 1);
+        }
+        List<Map<String, Object>> result = new ArrayList<>(buckets.values());
+        for (Map<String, Object> item : result)
+        {
+            Map<String, Integer> scoreCounts = (Map<String, Integer>) item.remove("scoreCounts");
+            List<Map<String, Object>> ranges = new ArrayList<>();
+            for (Map.Entry<String, Integer> entry : scoreCounts.entrySet())
+            {
+                ranges.add(map("range", entry.getKey(), "count", entry.getValue(), "label", scoreRangeLabel(entry.getKey())));
+            }
+            item.put("scoreGroups", ranges);
+            item.remove("weighted");
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void addRatingToBucket(Map<String, Object> bucket, int rating)
+    {
+        Map<Integer, Integer> counts = (Map<Integer, Integer>) bucket.get("counts");
+        counts.put(rating, counts.get(rating) + 1);
+        int total = intValue(bucket.get("total")) + 1;
+        int weighted = intValue(bucket.get("weighted")) + rating;
+        bucket.put("total", total);
+        bucket.put("weighted", weighted);
+        bucket.put("average", String.format("%.1f", weighted / (float) total));
+    }
+
+    private static String scoreRangeLabel(String range)
+    {
+        if ("30以内".equals(range))
+        {
+            return "分数<30";
+        }
+        if ("30-50".equals(range))
+        {
+            return "30<分数<50";
+        }
+        if ("50-70".equals(range))
+        {
+            return "50<分数<70";
+        }
+        if ("70+".equals(range))
+        {
+            return "70<分数";
+        }
+        return range;
+    }
+
     private static Map<String, Object> createOrderRecord(String courseId, Map<String, Object> user, String source)
     {
         return createOrderRecord(courseId, user, source, "");
@@ -4798,7 +5316,7 @@ public class CourseApiController
 
     private static String normalizeCardCode(Object value)
     {
-        return str(value).trim().toUpperCase().replace(" ", "");
+        return str(value).trim().toLowerCase().replaceAll("\\s+", "");
     }
 
     private static Map<String, Object> activationCode(String code, String courseId, String cardType, String ownerUserId)
@@ -4814,8 +5332,9 @@ public class CourseApiController
             "cardTypeText", cardTypeText(cardType),
             "durationText", cardDurationText(cardType),
             "ownerUserId", ownerUserId,
-            "ownerName", owner == null ? "" : owner.get("name"),
+            "ownerName", owner == null ? "" : firstNonBlank(owner.get("organizationName"), owner.get("name"), owner.get("id")),
             "status", "available",
+            "locked", false,
             "createdAt", now()
         );
     }
@@ -4903,8 +5422,62 @@ public class CourseApiController
 
     private static String generateCardCode(String cardType)
     {
-        String prefix = "year".equals(normalizeCardType(cardType)) ? "YEAR" : ("hours72".equals(normalizeCardType(cardType)) ? "72H" : "7D");
-        return "CARD-" + prefix + "-" + System.currentTimeMillis();
+        String alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+        for (int length = 9; length <= 16; length++)
+        {
+            for (int attempt = 0; attempt < 200; attempt++)
+            {
+                StringBuilder code = new StringBuilder();
+                boolean hasDigit = false;
+                boolean hasLetter = false;
+                for (int i = 0; i < length; i++)
+                {
+                    char ch = alphabet.charAt(ThreadLocalRandom.current().nextInt(alphabet.length()));
+                    if (Character.isDigit(ch))
+                    {
+                        hasDigit = true;
+                    }
+                    else
+                    {
+                        hasLetter = true;
+                    }
+                    code.append(ch);
+                }
+                if (!hasDigit || !hasLetter)
+                {
+                    continue;
+                }
+                String value = code.toString();
+                if (findActivationCode(value) == null)
+                {
+                    return value;
+                }
+            }
+        }
+        return "a4" + UUID.randomUUID().toString().replace("-", "").substring(0, 14).toLowerCase();
+    }
+
+    private static boolean isValidGeneratedCardCode(String code)
+    {
+        return str(code).matches("^(?=.*[0-9])(?=.*[a-z])[0-9a-z]{9,}$");
+    }
+
+    private static String generateUserId()
+    {
+        for (int length = 5; length <= 12; length++)
+        {
+            long min = (long) Math.pow(10, length - 1);
+            long max = (long) Math.pow(10, length) - 1;
+            for (int attempt = 0; attempt < 500; attempt++)
+            {
+                String id = String.valueOf(ThreadLocalRandom.current().nextLong(min, max + 1));
+                if (findById(users, id) == null)
+                {
+                    return id;
+                }
+            }
+        }
+        return String.valueOf(System.currentTimeMillis());
     }
 
     private static void putIfPresent(Map<String, Object> target, Map<String, Object> source, String key)
@@ -4921,7 +5494,7 @@ public class CourseApiController
             if ("ownerUserId".equals(key))
             {
                 Map<String, Object> owner = findById(users, str(source.get(key)));
-                target.put("ownerName", owner == null ? "" : owner.get("name"));
+                target.put("ownerName", owner == null ? "" : firstNonBlank(owner.get("organizationName"), owner.get("name"), owner.get("id")));
             }
             if ("courseId".equals(key))
             {
@@ -4970,6 +5543,46 @@ public class CourseApiController
         enrollment.put("orderId", order.get("id"));
         enrollment.put("status", "active");
         order.put("enrollmentId", enrollment.get("id"));
+    }
+
+    private static void updateUserCourseExpiry(String userId, String expiresAt)
+    {
+        if (userId.length() == 0 || expiresAt.length() == 0)
+        {
+            return;
+        }
+        Map<String, Object> order = latestOrderForUser(userId);
+        if (order != null)
+        {
+            order.put("expiresAt", expiresAt);
+            if ("expired".equals(order.get("status")) && !isExpired(expiresAt))
+            {
+                order.put("status", "activated");
+            }
+            Map<String, Object> enrollment = findById(enrollments, str(order.get("enrollmentId")));
+            if (enrollment == null)
+            {
+                enrollment = findEnrollment(userId, str(order.get("courseId")));
+            }
+            if (enrollment != null)
+            {
+                enrollment.put("expiry", expiresAt);
+                if ("expired".equals(enrollment.get("status")) && !isExpired(expiresAt))
+                {
+                    enrollment.put("status", "active");
+                }
+            }
+            return;
+        }
+        Map<String, Object> enrollment = latestAnyEnrollmentForUser(userId);
+        if (enrollment != null)
+        {
+            enrollment.put("expiry", expiresAt);
+            if ("expired".equals(enrollment.get("status")) && !isExpired(expiresAt))
+            {
+                enrollment.put("status", "active");
+            }
+        }
     }
 
     private static void copyEnrollmentField(Map<String, Object> enrollment, Map<String, Object> order, String key)
@@ -5024,7 +5637,12 @@ public class CourseApiController
 
     private static boolean isEnrollmentOpen(Map<String, Object> enrollment)
     {
-        return "active".equals(enrollment.get("status")) && !isExpired(str(enrollment.get("expiry")));
+        if (!"active".equals(enrollment.get("status")) || isExpired(str(enrollment.get("expiry"))))
+        {
+            return false;
+        }
+        Map<String, Object> card = findActivationCode(str(enrollment.get("cardCode")));
+        return card == null || !activationCardLocked(card);
     }
 
     private static void refreshExpiredEnrollments()
@@ -5151,12 +5769,52 @@ public class CourseApiController
         return null;
     }
 
+    private static Map<String, Object> latestOrderForUser(String userId)
+    {
+        for (int i = orders.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> order = orders.get(i);
+            if (userId.equals(str(order.get("userId"))))
+            {
+                return order;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> latestOrderForCard(String cardCode)
+    {
+        String code = normalizeCardCode(cardCode);
+        for (int i = orders.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> order = orders.get(i);
+            if (code.equals(normalizeCardCode(order.get("cardCode"))))
+            {
+                return order;
+            }
+        }
+        return null;
+    }
+
     private static Map<String, Object> latestEnrollmentForUser(String userId)
     {
         for (int i = enrollments.size() - 1; i >= 0; i--)
         {
             Map<String, Object> enrollment = enrollments.get(i);
             if (userId.equals(str(enrollment.get("userId"))) && isEnrollmentOpen(enrollment))
+            {
+                return enrollment;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> latestAnyEnrollmentForUser(String userId)
+    {
+        for (int i = enrollments.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> enrollment = enrollments.get(i);
+            if (userId.equals(str(enrollment.get("userId"))))
             {
                 return enrollment;
             }
