@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1321,6 +1322,10 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码无效");
         }
+        if (syncActivationCardFromUsage(card))
+        {
+            persistData();
+        }
         if (!"available".equals(card.get("status")) || activationCardLocked(card))
         {
             return AjaxResult.error("激活码已使用或已关闭");
@@ -1364,6 +1369,8 @@ public class CourseApiController
         card.put("region", region);
         card.put("activatedAt", now());
         card.put("expiresAt", expiry);
+        card.put("orderId", order.get("id"));
+        card.put("enrollmentId", order.get("enrollmentId"));
         persistData();
         return AjaxResult.success(order);
     }
@@ -1371,6 +1378,10 @@ public class CourseApiController
     @GetMapping("/admin/dashboard")
     public AjaxResult dashboard()
     {
+        if (reconcileActivationCardsFromOrders())
+        {
+            persistData();
+        }
         return AjaxResult.success(map(
             "courseTotal", courses.size(),
             "courseStats", courseKindStats(),
@@ -1565,6 +1576,10 @@ public class CourseApiController
     @GetMapping("/admin/users")
     public AjaxResult adminUsers()
     {
+        if (reconcileActivationCardsFromOrders())
+        {
+            persistData();
+        }
         List<Map<String, Object>> list = new ArrayList<>();
         for (Map<String, Object> user : users)
         {
@@ -1618,6 +1633,10 @@ public class CourseApiController
     @GetMapping("/admin/activation-codes")
     public AjaxResult adminActivationCodes()
     {
+        if (reconcileActivationCardsFromOrders())
+        {
+            persistData();
+        }
         enrichActivationCodes();
         return AjaxResult.success(activationCodes);
     }
@@ -1765,6 +1784,7 @@ public class CourseApiController
         order.put("status", "closed");
         order.put("closedAt", now());
         closeEnrollmentForOrder(order);
+        syncActivationCardFromOrder(order);
         card.put("authorizationClosed", true);
         card.put("authorizationClosedAt", now());
         logOperation("激活码管理", card.get("usedByName"), card.get("courseTitle"), "关闭激活码课程授权：" + card.get("code"), "已关闭");
@@ -1785,6 +1805,10 @@ public class CourseApiController
         if (card == null)
         {
             return AjaxResult.error("激活码无效");
+        }
+        if (syncActivationCardFromUsage(card))
+        {
+            persistData();
         }
         if (!"available".equals(card.get("status")))
         {
@@ -1829,6 +1853,8 @@ public class CourseApiController
         card.put("region", order.get("region"));
         card.put("activatedAt", now());
         card.put("expiresAt", expiry);
+        card.put("orderId", order.get("id"));
+        card.put("enrollmentId", order.get("enrollmentId"));
         logOperation("授权开通", user.get("name"), order.get("courseTitle"), "后台激活码开通：" + code, "已开通");
         persistData();
         return AjaxResult.success(order);
@@ -1883,6 +1909,10 @@ public class CourseApiController
     public AjaxResult adminOrders()
     {
         refreshExpiredEnrollments();
+        if (reconcileActivationCardsFromOrders())
+        {
+            persistData();
+        }
         return AjaxResult.success(orders);
     }
 
@@ -1909,6 +1939,7 @@ public class CourseApiController
         order.put("region", str(body.get("region")));
         order.put("expiresAt", expiry);
         updateEnrollmentFromOrder(order);
+        syncActivationCardFromOrder(order);
         logOperation("授权开通", user.get("name"), order.get("courseTitle"), "后台手动开课", "已开通");
         persistData();
         return AjaxResult.success(order);
@@ -1925,6 +1956,7 @@ public class CourseApiController
         order.put("status", "closed");
         order.put("closedAt", now());
         closeEnrollmentForOrder(order);
+        syncActivationCardFromOrder(order);
         logOperation("授权开通", order.get("userName"), order.get("courseTitle"), "关闭课程权限", "已关闭");
         persistData();
         return AjaxResult.success(order);
@@ -4760,8 +4792,10 @@ public class CourseApiController
 
     private static void enrichActivationCodes()
     {
+        boolean changed = false;
         for (Map<String, Object> card : activationCodes)
         {
+            changed = syncActivationCardFromUsage(card) || changed;
             enrichActivationCard(card);
         }
     }
@@ -5945,6 +5979,139 @@ public class CourseApiController
         return null;
     }
 
+    private static Map<String, Object> latestEnrollmentForCard(String cardCode)
+    {
+        String code = normalizeCardCode(cardCode);
+        for (int i = enrollments.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> enrollment = enrollments.get(i);
+            if (code.equals(normalizeCardCode(enrollment.get("cardCode"))))
+            {
+                return enrollment;
+            }
+        }
+        return null;
+    }
+
+    private static boolean reconcileActivationCardsFromOrders()
+    {
+        boolean changed = false;
+        for (Map<String, Object> card : activationCodes)
+        {
+            changed = syncActivationCardFromUsage(card) || changed;
+        }
+        return changed;
+    }
+
+    private static boolean syncActivationCardFromOrder(Map<String, Object> order)
+    {
+        String code = normalizeCardCode(order == null ? "" : order.get("cardCode"));
+        if (code.length() == 0)
+        {
+            return false;
+        }
+        Map<String, Object> card = findActivationCode(code);
+        if (card == null)
+        {
+            return false;
+        }
+        Map<String, Object> enrollment = findById(enrollments, str(order.get("enrollmentId")));
+        if (enrollment == null)
+        {
+            enrollment = findEnrollment(str(order.get("userId")), str(order.get("courseId")));
+        }
+        return applyActivationCardUsage(card, order, enrollment);
+    }
+
+    private static boolean syncActivationCardFromUsage(Map<String, Object> card)
+    {
+        if (card == null)
+        {
+            return false;
+        }
+        String code = normalizeCardCode(card.get("code"));
+        if (code.length() == 0)
+        {
+            return false;
+        }
+        Map<String, Object> order = latestOrderForCard(code);
+        Map<String, Object> enrollment = latestEnrollmentForCard(code);
+        if (order == null && enrollment == null)
+        {
+            return false;
+        }
+        return applyActivationCardUsage(card, order, enrollment);
+    }
+
+    private static boolean applyActivationCardUsage(Map<String, Object> card, Map<String, Object> order, Map<String, Object> enrollment)
+    {
+        String userId = firstNonBlank(
+            order == null ? "" : order.get("userId"),
+            enrollment == null ? "" : enrollment.get("userId"),
+            card.get("usedByUserId")
+        );
+        Map<String, Object> user = findById(users, userId);
+        String courseId = firstNonBlank(
+            order == null ? "" : order.get("courseId"),
+            enrollment == null ? "" : enrollment.get("courseId"),
+            card.get("courseId")
+        );
+        String ownerUserId = firstNonBlank(
+            card.get("ownerUserId"),
+            order == null ? "" : order.get("ownerUserId"),
+            order == null ? "" : order.get("agencyUserId"),
+            enrollment == null ? "" : enrollment.get("ownerUserId"),
+            enrollment == null ? "" : enrollment.get("agencyUserId")
+        );
+        String expiresAt = firstNonBlank(
+            order == null ? "" : order.get("expiresAt"),
+            enrollment == null ? "" : enrollment.get("expiry"),
+            card.get("expiresAt")
+        );
+        String activatedAt = firstNonBlank(
+            card.get("activatedAt"),
+            order == null ? "" : order.get("activatedAt"),
+            order == null ? "" : order.get("createdAt"),
+            enrollment == null ? "" : enrollment.get("activatedAt"),
+            enrollment == null ? "" : enrollment.get("createdAt")
+        );
+        String studentName = firstNonBlank(
+            order == null ? "" : order.get("studentName"),
+            enrollment == null ? "" : enrollment.get("studentName"),
+            user == null ? "" : user.get("name"),
+            card.get("studentName")
+        );
+        boolean closed = "closed".equals(str(order == null ? "" : order.get("status")))
+            || "closed".equals(str(enrollment == null ? "" : enrollment.get("status")))
+            || Boolean.TRUE.equals(card.get("authorizationClosed"));
+
+        boolean changed = false;
+        changed = putIfChanged(card, "status", "used") || changed;
+        changed = putIfChanged(card, "courseId", courseId) || changed;
+        changed = putIfChanged(card, "ownerUserId", ownerUserId) || changed;
+        changed = putIfChanged(card, "usedByUserId", userId) || changed;
+        changed = putIfChanged(card, "usedByName", firstNonBlank(order == null ? "" : order.get("userName"), user == null ? "" : user.get("name"))) || changed;
+        changed = putIfChanged(card, "studentName", studentName) || changed;
+        changed = putIfChanged(card, "gender", firstNonBlank(order == null ? "" : order.get("gender"), enrollment == null ? "" : enrollment.get("gender"), user == null ? "" : user.get("gender"))) || changed;
+        changed = putIfChanged(card, "recentExamScore", firstNonBlank(order == null ? "" : order.get("recentExamScore"), enrollment == null ? "" : enrollment.get("recentExamScore"), user == null ? "" : user.get("recentExamScore"))) || changed;
+        changed = putIfChanged(card, "grade", firstNonBlank(order == null ? "" : order.get("grade"), enrollment == null ? "" : enrollment.get("grade"), user == null ? "" : user.get("grade"))) || changed;
+        changed = putIfChanged(card, "schoolName", firstNonBlank(order == null ? "" : order.get("schoolName"), enrollment == null ? "" : enrollment.get("schoolName"), user == null ? "" : user.get("schoolName"))) || changed;
+        changed = putIfChanged(card, "region", firstNonBlank(order == null ? "" : order.get("region"), enrollment == null ? "" : enrollment.get("region"), user == null ? "" : user.get("region"))) || changed;
+        changed = putIfChanged(card, "activatedAt", activatedAt) || changed;
+        changed = putIfChanged(card, "expiresAt", expiresAt) || changed;
+        changed = putIfChanged(card, "cardType", normalizeCardType(firstNonBlank(order == null ? "" : order.get("cardType"), enrollment == null ? "" : enrollment.get("cardType"), card.get("cardType")))) || changed;
+        changed = putIfChanged(card, "orderId", order == null ? "" : order.get("id")) || changed;
+        changed = putIfChanged(card, "enrollmentId", firstNonBlank(order == null ? "" : order.get("enrollmentId"), enrollment == null ? "" : enrollment.get("id"))) || changed;
+        if (closed)
+        {
+            changed = putIfChanged(card, "authorizationClosed", true) || changed;
+        }
+        putIfPresent(card, card, "courseId");
+        putIfPresent(card, card, "ownerUserId");
+        putIfPresent(card, card, "cardType");
+        return changed;
+    }
+
     private static Map<String, Object> latestEnrollmentForUser(String userId)
     {
         for (int i = enrollments.size() - 1; i >= 0; i--)
@@ -6064,6 +6231,30 @@ public class CourseApiController
             }
         }
         return "";
+    }
+
+    private static boolean putIfChanged(Map<String, Object> target, String key, Object value)
+    {
+        if (target == null || key == null || value == null)
+        {
+            return false;
+        }
+        Object next = value;
+        if (value instanceof String)
+        {
+            String text = ((String) value).trim();
+            if (text.length() == 0)
+            {
+                return false;
+            }
+            next = text;
+        }
+        if (Objects.equals(target.get(key), next))
+        {
+            return false;
+        }
+        target.put(key, next);
+        return true;
     }
 
     private static Map<String, Object> findCourse(String id)
