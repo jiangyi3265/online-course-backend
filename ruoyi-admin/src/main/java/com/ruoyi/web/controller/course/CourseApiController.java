@@ -3473,6 +3473,28 @@ public class CourseApiController
         return boolValue(correctValue, false) ? "correct" : "wrong";
     }
 
+    private static String reviewResultText(Object reviewResultValue)
+    {
+        String reviewResult = str(reviewResultValue).trim().toLowerCase();
+        if ("correct".equals(reviewResult) || "right".equals(reviewResult) || "ok".equals(reviewResult))
+        {
+            return "对";
+        }
+        if ("partial".equals(reviewResult) || "half".equals(reviewResult) || "half_correct".equals(reviewResult))
+        {
+            return "半对";
+        }
+        if ("wrong".equals(reviewResult) || "incorrect".equals(reviewResult) || "bad".equals(reviewResult))
+        {
+            return "错";
+        }
+        if ("pending".equals(reviewResult))
+        {
+            return "待自评";
+        }
+        return "";
+    }
+
     private static void markWrongQuestionMastered(Map<String, Object> user, String courseId, String questionId)
     {
         Map<String, Object> question = findById(questions, questionId);
@@ -3996,6 +4018,16 @@ public class CourseApiController
                 "correctAnswerText", str(detail.get("answerText")).trim().length() > 0 ? detail.get("answerText") : (question == null ? correctAnswer : optionText(question, intValue(detail.get("answer")))),
                 "correct", Boolean.TRUE.equals(detail.get("correct")),
                 "manualReview", Boolean.TRUE.equals(detail.get("manualReview")),
+                "selfReviewed", boolValue(detail.get("selfReviewed"), false),
+                "selectedText", detail.get("selectedText"),
+                "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
+                "answerImageUrl", detail.get("answerImageUrl"),
+                "reviewResult", detail.get("reviewResult"),
+                "reviewResultText", reviewResultText(detail.get("reviewResult")),
+                "partialCredit", detail.get("partialCredit"),
+                "noUpload", boolValue(detail.get("noUpload"), false),
+                "skipped", boolValue(detail.get("skipped"), false),
+                "reviewedAt", detail.get("reviewedAt"),
                 "analysis", detail.get("analysis"),
                 "analysisImageUrl", detail.get("analysisImageUrl"),
                 "videoAnalysisUrl", detail.get("videoAnalysisUrl")
