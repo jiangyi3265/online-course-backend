@@ -5914,6 +5914,7 @@ public class CourseApiController
         item.put("openedAt", latestOrder == null ? "" : latestOrder.get("createdAt"));
         item.put("openedCardCode", firstNonBlank(latestOrder == null ? "" : latestOrder.get("cardCode"), latestEnrollment == null ? "" : latestEnrollment.get("cardCode")));
         item.put("expiresAt", firstNonBlank(latestOrder == null ? "" : latestOrder.get("expiresAt"), latestEnrollment == null ? "" : latestEnrollment.get("expiry")));
+        item.put("courseStatus", courseStatusForUser(userId));
         item.put("studentName", firstNonBlank(latest == null ? "" : latest.get("studentName"), user.get("studentName"), user.get("name")));
         item.put("gender", firstNonBlank(latest == null ? "" : latest.get("gender"), user.get("gender")));
         item.put("recentExamScore", firstNonBlank(latest == null ? "" : latest.get("recentExamScore"), user.get("recentExamScore")));
@@ -5937,6 +5938,46 @@ public class CourseApiController
             return "管理员";
         }
         return openCourseCount > 0 ? "正式学员" : "试用学员";
+    }
+
+    private static String courseStatusForUser(String userId)
+    {
+        boolean hasCourse = false;
+        for (Map<String, Object> enrollment : enrollments)
+        {
+            if (!userId.equals(str(enrollment.get("userId"))))
+            {
+                continue;
+            }
+            String status = str(enrollment.get("status"));
+            if ("closed".equals(status))
+            {
+                continue;
+            }
+            hasCourse = true;
+            if ("active".equals(status) && !isExpired(str(enrollment.get("expiry"))))
+            {
+                return "active";
+            }
+        }
+        for (Map<String, Object> order : orders)
+        {
+            if (!userId.equals(str(order.get("userId"))))
+            {
+                continue;
+            }
+            String status = str(order.get("status"));
+            if ("closed".equals(status))
+            {
+                continue;
+            }
+            hasCourse = true;
+            if ("activated".equals(status) && !isExpired(str(order.get("expiresAt"))))
+            {
+                return "active";
+            }
+        }
+        return hasCourse ? "expired" : "none";
     }
 
     private static Map<String, Object> latestOpenOrderForUser(String userId)
