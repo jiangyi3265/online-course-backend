@@ -987,7 +987,7 @@ public class CourseApiController
             "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct && !manualReview)
@@ -1000,7 +1000,9 @@ public class CourseApiController
                 "title", "我的收藏",
                 "type", "favorite",
                 "stem", question.get("stem"),
+                "stemImageUrl", question.get("stemImageUrl"),
                 "options", question.get("options"),
+                "optionImageUrls", question.get("optionImageUrls"),
                 "answer", question.get("answer"),
                 "answerText", answerText,
                 "selected", selected,
@@ -3024,7 +3026,9 @@ public class CourseApiController
                         "type", type,
                         "sourceType", sourceLabel(type),
                         "stem", q.get("stem"),
+                        "stemImageUrl", q.get("stemImageUrl"),
                         "options", q.get("options"),
+                        "optionImageUrls", q.get("optionImageUrls"),
                         "answer", q.get("answer"),
                         "answerText", answerText,
                         "selected", selected,
@@ -3046,7 +3050,7 @@ public class CourseApiController
                     recordWrongQuestion(wrong, user);
                 }
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", selectedText);
@@ -3256,6 +3260,21 @@ public class CourseApiController
         {
             question.put("difficulty", 1);
         }
+        String stemImageUrl = firstNonBlank(question.get("stemImageUrl"), question.get("questionImageUrl"), question.get("stemImage"));
+        if (stemImageUrl.length() > 0)
+        {
+            question.put("stemImageUrl", stemImageUrl);
+        }
+        List<String> optionImageUrls = mediaUrlList(question.get("optionImageUrls"));
+        if (optionImageUrls.isEmpty())
+        {
+            optionImageUrls = mediaUrlList(question.get("optionImages"));
+        }
+        if (optionImageUrls.isEmpty())
+        {
+            optionImageUrls = mediaUrlList(question.get("optionImageUrl"));
+        }
+        question.put("optionImageUrls", optionImageUrls);
         String imageUrl = analysisImageUrl(question);
         if (imageUrl.length() > 0)
         {
@@ -3276,6 +3295,11 @@ public class CourseApiController
             if (!(question.get("options") instanceof List))
             {
                 question.put("options", new ArrayList<Object>());
+            }
+            List<Object> options = (List<Object>) question.get("options");
+            while (options.size() < optionImageUrls.size())
+            {
+                options.add("");
             }
             question.put("answer", intValue(question.get("answer")));
             return;
@@ -3437,7 +3461,9 @@ public class CourseApiController
             "type", attempt.get("type"),
             "sourceType", attempt.get("sourceType"),
             "stem", detail.get("stem"),
+            "stemImageUrl", detail.get("stemImageUrl"),
             "options", question == null ? new ArrayList<Object>() : question.get("options"),
+            "optionImageUrls", question == null ? detail.get("optionImageUrls") : question.get("optionImageUrls"),
             "answer", detail.get("answer"),
             "answerText", detail.get("answerText"),
             "answerImageUrl", detail.get("answerImageUrl"),
@@ -3625,8 +3651,10 @@ public class CourseApiController
     private static String questionFingerprint(Map<String, Object> question)
     {
         String seed = normalizeQuestionText(question.get("stem")) + "|"
+            + normalizeQuestionText(question.get("stemImageUrl")) + "|"
             + normalizeQuestionText(question.get("questionType")) + "|"
             + normalizeQuestionText(question.get("options")) + "|"
+            + normalizeQuestionText(question.get("optionImageUrls")) + "|"
             + normalizeQuestionText(question.get("answer")) + "|"
             + normalizeQuestionText(question.get("answerText"));
         if (seed.replace("|", "").length() == 0)
@@ -3681,8 +3709,9 @@ public class CourseApiController
     {
         for (String key : Arrays.asList(
             "questionId", "questionKey", "sourceWrongId", "originType", "courseId", "courseTitle", "subjectTitle",
-            "title", "type", "sourceType", "stem", "options", "answer", "selected", "analysis", "videoAnalysisUrl",
-            "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
+            "title", "type", "sourceType", "stem", "stemImageUrl", "options", "optionImageUrls", "answer", "answerText",
+            "answerImageUrl", "selected", "selectedText", "studentAnswerImageUrl", "analysis", "analysisImageUrl",
+            "videoAnalysisUrl", "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
         {
             if (source.containsKey(key))
             {
@@ -4011,6 +4040,8 @@ public class CourseApiController
                 "questionNo", i + 1,
                 "total", total,
                 "stem", detail.get("stem"),
+                "stemImageUrl", detail.get("stemImageUrl"),
+                "optionImageUrls", detail.get("optionImageUrls"),
                 "questionType", type,
                 "myAnswer", myAnswer.length() == 0 ? "--" : myAnswer,
                 "correctAnswer", correctAnswer.length() == 0 ? "--" : correctAnswer,
@@ -4130,8 +4161,10 @@ public class CourseApiController
         return map(
             "id", wrong.get("questionId"),
             "stem", wrong.get("stem"),
+            "stemImageUrl", wrong.get("stemImageUrl"),
             "questionType", wrong.get("questionType"),
             "options", wrong.get("options"),
+            "optionImageUrls", wrong.get("optionImageUrls"),
             "knowledge", wrong.get("knowledge"),
             "analysisImageUrl", wrong.get("analysisImageUrl"),
             "videoAnalysisUrl", wrong.get("videoAnalysisUrl")
@@ -6265,6 +6298,33 @@ public class CourseApiController
             return result;
         }
         return new ArrayList<>();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> mediaUrlList(Object value)
+    {
+        List<String> result = new ArrayList<>();
+        if (value instanceof List)
+        {
+            for (Object item : (List<Object>) value)
+            {
+                String text = str(item).trim();
+                if (text.length() > 0)
+                {
+                    result.add(text);
+                }
+            }
+            return result;
+        }
+        for (String item : str(value).split("[,\\n]"))
+        {
+            String text = item.trim();
+            if (text.length() > 0)
+            {
+                result.add(text);
+            }
+        }
+        return result;
     }
 
     private static List<String> commaList(String value)
