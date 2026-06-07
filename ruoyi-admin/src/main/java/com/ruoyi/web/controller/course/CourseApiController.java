@@ -359,12 +359,14 @@ public class CourseApiController
     }
 
     @GetMapping("/app/courses")
-    public AjaxResult appCourses(@RequestParam Map<String, String> params)
+    public AjaxResult appCourses(@RequestParam Map<String, String> params, HttpServletRequest request)
     {
+        Map<String, Object> user = currentUser(request);
+        refreshExpiredEnrollments();
         List<Map<String, Object>> list = new ArrayList<>();
         for (Map<String, Object> course : filteredCourses(params))
         {
-            list.add(courseListItem(course));
+            list.add(courseListItem(course, user));
         }
         return AjaxResult.success(list);
     }
@@ -988,7 +990,7 @@ public class CourseApiController
             "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "stemFileUrl", question.get("stemFileUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct && !manualReview)
@@ -1002,14 +1004,18 @@ public class CourseApiController
                 "type", "favorite",
                 "stem", question.get("stem"),
                 "stemImageUrl", question.get("stemImageUrl"),
+                "stemFileUrl", question.get("stemFileUrl"),
                 "options", question.get("options"),
                 "optionImageUrls", question.get("optionImageUrls"),
                 "answer", question.get("answer"),
                 "answerText", answerText,
+                "answerImageUrl", question.get("answerImageUrl"),
+                "answerFileUrl", question.get("answerFileUrl"),
                 "selected", selected,
                 "selectedText", selectedText,
                 "analysis", question.get("analysis"),
                 "analysisImageUrl", analysisImageUrl(question),
+                "analysisFileUrl", question.get("analysisFileUrl"),
                 "videoAnalysisUrl", analysisVideoUrl(question),
                 "knowledge", question.get("knowledge"),
                 "mastered", false,
@@ -1017,7 +1023,7 @@ public class CourseApiController
             ), user);
         }
         persistData();
-        return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
+        return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
     }
 
     @GetMapping("/app/my/students")
@@ -1339,9 +1345,9 @@ public class CourseApiController
         {
             return AjaxResult.error("请选择要开通的课程");
         }
-        if (findCourse(courseId) == null)
+        if (!isFullCourse(courseId))
         {
-            return AjaxResult.error("课程不存在");
+            return AjaxResult.error("请选择正式课程");
         }
         String expiry = expiryForCard(card);
         Map<String, Object> user = currentUser(request);
@@ -1482,6 +1488,10 @@ public class CourseApiController
     @PostMapping("/admin/docs")
     public AjaxResult addDoc(@RequestBody Map<String, Object> doc)
     {
+        if (!isFullCourse(str(doc.get("courseId")).trim()))
+        {
+            return AjaxResult.error("资料只能绑定正式课程");
+        }
         if (str(doc.get("id")).length() == 0)
         {
             doc.put("id", "doc-" + System.currentTimeMillis());
@@ -1504,6 +1514,10 @@ public class CourseApiController
         if (doc == null)
         {
             return AjaxResult.error("资料不存在");
+        }
+        if (!isFullCourse(str(body.get("courseId")).trim()))
+        {
+            return AjaxResult.error("资料只能绑定正式课程");
         }
         doc.putAll(body);
         doc.put("id", id);
@@ -1657,6 +1671,11 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码已存在");
         }
+        String courseId = str(body.get("courseId")).trim();
+        if (!isFullCourse(courseId))
+        {
+            return AjaxResult.error("激活码只能绑定正式课程");
+        }
         String ownerUserId = str(body.get("ownerUserId")).trim();
         if (ownerUserId.length() > 0 && findById(users, ownerUserId) == null)
         {
@@ -1664,7 +1683,7 @@ public class CourseApiController
         }
         Map<String, Object> card = activationCode(
             code,
-            str(body.get("courseId")).trim(),
+            courseId,
             str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")),
             ownerUserId
         );
@@ -1732,6 +1751,10 @@ public class CourseApiController
                     }
                 }
                 putIfPresent(card, body, "ownerUserId");
+            }
+            if (body.containsKey("courseId") && !isFullCourse(str(body.get("courseId")).trim()))
+            {
+                return AjaxResult.error("激活码只能绑定正式课程");
             }
             putIfPresent(card, body, "courseId");
             putIfPresent(card, body, "cardType");
@@ -1817,15 +1840,11 @@ public class CourseApiController
         String courseId = str(body.get("courseId")).trim();
         if (courseId.length() == 0)
         {
-            courseId = str(card.get("courseId"));
-        }
-        if (courseId.length() == 0)
-        {
             return AjaxResult.error("请选择要开通的课程");
         }
-        if (findCourse(courseId) == null)
+        if (!isFullCourse(courseId))
         {
-            return AjaxResult.error("课程不存在");
+            return AjaxResult.error("请选择正式课程");
         }
         String expiry = expiryForCard(card);
         Map<String, Object> order = createOrderRecord(courseId, user, "后台激活码开通", code, expiry, str(card.get("cardType")));
@@ -1925,9 +1944,9 @@ public class CourseApiController
             return AjaxResult.error("用户不存在");
         }
         String courseId = str(body.get("courseId")).trim();
-        if (courseId.length() == 0 || findCourse(courseId) == null)
+        if (!isFullCourse(courseId))
         {
-            return AjaxResult.error("课程不存在，请先选择有效课程");
+            return AjaxResult.error("请选择有效正式课程");
         }
         String expiry = expiryByType(str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")));
         Map<String, Object> order = createOrderRecord(courseId, user, "后台开课", str(body.get("cardCode")), expiry, str(body.get("cardType")));
@@ -2724,8 +2743,9 @@ public class CourseApiController
         return list;
     }
 
-    private static Map<String, Object> courseListItem(Map<String, Object> course)
+    private static Map<String, Object> courseListItem(Map<String, Object> course, Map<String, Object> user)
     {
+        boolean available = "trial".equals(course.get("kind")) || hasActiveEnrollment(user, scopedCourseId(course.get("id")));
         return map(
             "id", course.get("id"),
             "stage", course.get("stage"),
@@ -2739,6 +2759,9 @@ public class CourseApiController
             "openText", course.get("openText"),
             "cover", course.get("cover"),
             "isTry", "trial".equals(course.get("kind")),
+            "available", available,
+            "activated", available && "full".equals(course.get("kind")),
+            "hasAccess", available,
             "studyCount", course.get("studyCount"),
             "status", course.get("status"),
             "sort", course.get("sort")
@@ -3059,10 +3082,13 @@ public class CourseApiController
                         "sourceType", sourceLabel(type),
                         "stem", q.get("stem"),
                         "stemImageUrl", q.get("stemImageUrl"),
+                        "stemFileUrl", q.get("stemFileUrl"),
                         "options", q.get("options"),
                         "optionImageUrls", q.get("optionImageUrls"),
                         "answer", q.get("answer"),
                         "answerText", answerText,
+                        "answerImageUrl", q.get("answerImageUrl"),
+                        "answerFileUrl", q.get("answerFileUrl"),
                         "selected", selected,
                         "selectedText", selectedText,
                         "studentAnswerImageUrl", studentAnswerImageUrl,
@@ -3072,6 +3098,7 @@ public class CourseApiController
                         "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
                         "analysis", q.get("analysis"),
                         "analysisImageUrl", analysisImageUrl(q),
+                        "analysisFileUrl", q.get("analysisFileUrl"),
                         "videoAnalysisUrl", analysisVideoUrl(q),
                         "knowledge", q.get("knowledge"),
                         "mastered", false,
@@ -3082,7 +3109,7 @@ public class CourseApiController
                     recordWrongQuestion(wrong, user);
                 }
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "stemFileUrl", q.get("stemFileUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "answerFileUrl", str(q.get("answerFileUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "analysisFileUrl", q.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", selectedText);
@@ -3272,12 +3299,14 @@ public class CourseApiController
             item.remove("answer");
             item.remove("answerText");
             item.remove("answerImageUrl");
+            item.remove("answerFileUrl");
             item.remove("acceptableAnswers");
             item.put("manualReview", manualReview);
             if (manualReview)
             {
                 item.put("answerText", correctAnswerText(q));
                 item.put("answerImageUrl", str(q.get("answerImageUrl")));
+                item.put("answerFileUrl", str(q.get("answerFileUrl")));
             }
             list.add(item);
         }
@@ -3297,6 +3326,11 @@ public class CourseApiController
         {
             question.put("stemImageUrl", stemImageUrl);
         }
+        String stemFileUrl = firstNonBlank(question.get("stemFileUrl"), question.get("questionFileUrl"), question.get("stemFile"));
+        if (stemFileUrl.length() > 0)
+        {
+            question.put("stemFileUrl", stemFileUrl);
+        }
         List<String> optionImageUrls = mediaUrlList(question.get("optionImageUrls"));
         if (optionImageUrls.isEmpty())
         {
@@ -3312,6 +3346,11 @@ public class CourseApiController
         {
             question.put("analysisImageUrl", imageUrl);
         }
+        String analysisFileUrl = firstNonBlank(question.get("analysisFileUrl"), question.get("explainFileUrl"), question.get("analysisDocUrl"));
+        if (analysisFileUrl.length() > 0)
+        {
+            question.put("analysisFileUrl", analysisFileUrl);
+        }
         String videoUrl = analysisVideoUrl(question);
         if (videoUrl.length() > 0)
         {
@@ -3321,6 +3360,11 @@ public class CourseApiController
         if (answerImageUrl.length() > 0)
         {
             question.put("answerImageUrl", answerImageUrl);
+        }
+        String answerFileUrl = firstNonBlank(question.get("answerFileUrl"), question.get("answerDocUrl"), question.get("answerDocumentUrl"));
+        if (answerFileUrl.length() > 0)
+        {
+            question.put("answerFileUrl", answerFileUrl);
         }
         if (isChoiceQuestion(question))
         {
@@ -3494,11 +3538,13 @@ public class CourseApiController
             "sourceType", attempt.get("sourceType"),
             "stem", detail.get("stem"),
             "stemImageUrl", detail.get("stemImageUrl"),
+            "stemFileUrl", detail.get("stemFileUrl"),
             "options", question == null ? new ArrayList<Object>() : question.get("options"),
             "optionImageUrls", question == null ? detail.get("optionImageUrls") : question.get("optionImageUrls"),
             "answer", detail.get("answer"),
             "answerText", detail.get("answerText"),
             "answerImageUrl", detail.get("answerImageUrl"),
+            "answerFileUrl", detail.get("answerFileUrl"),
             "selected", detail.get("selected"),
             "selectedText", detail.get("selectedText"),
             "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
@@ -3506,6 +3552,7 @@ public class CourseApiController
             "partialCredit", detail.get("partialCredit"),
             "analysis", detail.get("analysis"),
             "analysisImageUrl", detail.get("analysisImageUrl"),
+            "analysisFileUrl", detail.get("analysisFileUrl"),
             "videoAnalysisUrl", detail.get("videoAnalysisUrl"),
             "knowledge", question == null ? "" : question.get("knowledge"),
             "mastered", false,
@@ -3741,8 +3788,9 @@ public class CourseApiController
     {
         for (String key : Arrays.asList(
             "questionId", "questionKey", "sourceWrongId", "originType", "courseId", "courseTitle", "subjectTitle",
-            "title", "type", "sourceType", "stem", "stemImageUrl", "options", "optionImageUrls", "answer", "answerText",
-            "answerImageUrl", "selected", "selectedText", "studentAnswerImageUrl", "analysis", "analysisImageUrl",
+            "title", "type", "sourceType", "stem", "stemImageUrl", "stemFileUrl", "options", "optionImageUrls", "answer", "answerText",
+            "answerImageUrl", "answerFileUrl", "selected", "selectedText", "studentAnswerImageUrl", "analysis", "analysisImageUrl",
+            "analysisFileUrl",
             "videoAnalysisUrl", "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
         {
             if (source.containsKey(key))
@@ -4073,6 +4121,7 @@ public class CourseApiController
                 "total", total,
                 "stem", detail.get("stem"),
                 "stemImageUrl", detail.get("stemImageUrl"),
+                "stemFileUrl", detail.get("stemFileUrl"),
                 "optionImageUrls", detail.get("optionImageUrls"),
                 "questionType", type,
                 "myAnswer", myAnswer.length() == 0 ? "--" : myAnswer,
@@ -4085,6 +4134,7 @@ public class CourseApiController
                 "selectedText", detail.get("selectedText"),
                 "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
                 "answerImageUrl", detail.get("answerImageUrl"),
+                "answerFileUrl", detail.get("answerFileUrl"),
                 "reviewResult", detail.get("reviewResult"),
                 "reviewResultText", reviewResultText(detail.get("reviewResult")),
                 "partialCredit", detail.get("partialCredit"),
@@ -4093,6 +4143,7 @@ public class CourseApiController
                 "reviewedAt", detail.get("reviewedAt"),
                 "analysis", detail.get("analysis"),
                 "analysisImageUrl", detail.get("analysisImageUrl"),
+                "analysisFileUrl", detail.get("analysisFileUrl"),
                 "videoAnalysisUrl", detail.get("videoAnalysisUrl")
             ));
         }
@@ -4183,6 +4234,7 @@ public class CourseApiController
             item.remove("answer");
             item.remove("answerText");
             item.remove("answerImageUrl");
+            item.remove("answerFileUrl");
             item.remove("acceptableAnswers");
             return item;
         }
@@ -4194,11 +4246,13 @@ public class CourseApiController
             "id", wrong.get("questionId"),
             "stem", wrong.get("stem"),
             "stemImageUrl", wrong.get("stemImageUrl"),
+            "stemFileUrl", wrong.get("stemFileUrl"),
             "questionType", wrong.get("questionType"),
             "options", wrong.get("options"),
             "optionImageUrls", wrong.get("optionImageUrls"),
             "knowledge", wrong.get("knowledge"),
             "analysisImageUrl", wrong.get("analysisImageUrl"),
+            "analysisFileUrl", wrong.get("analysisFileUrl"),
             "videoAnalysisUrl", wrong.get("videoAnalysisUrl")
         );
     }
@@ -5899,6 +5953,7 @@ public class CourseApiController
         Map<String, Object> latestEnrollment = latestEnrollmentForUser(userId);
         List<Map<String, Object>> activatedCourses = activatedCoursesForUser(userId);
         List<String> names = new ArrayList<>();
+        List<String> cardCodes = new ArrayList<>();
         for (Map<String, Object> course : activatedCourses)
         {
             String name = str(course.get("courseTitle"));
@@ -5906,13 +5961,19 @@ public class CourseApiController
             {
                 names.add(name);
             }
+            String cardCode = str(course.get("cardCode"));
+            if (cardCode.length() > 0)
+            {
+                cardCodes.add(cardCode);
+            }
         }
         Map<String, Object> latest = latestOrder != null ? latestOrder : latestEnrollment;
         item.put("activatedCourses", activatedCourses);
         item.put("openCourseCount", activatedCourses.size());
         item.put("openCourseNames", String.join("、", names));
         item.put("openedAt", latestOrder == null ? "" : latestOrder.get("createdAt"));
-        item.put("openedCardCode", firstNonBlank(latestOrder == null ? "" : latestOrder.get("cardCode"), latestEnrollment == null ? "" : latestEnrollment.get("cardCode")));
+        item.put("openedCardCode", cardCodes.isEmpty() ? firstNonBlank(latestOrder == null ? "" : latestOrder.get("cardCode"), latestEnrollment == null ? "" : latestEnrollment.get("cardCode")) : cardCodes.get(0));
+        item.put("openedCardCodes", cardCodes);
         item.put("expiresAt", firstNonBlank(latestOrder == null ? "" : latestOrder.get("expiresAt"), latestEnrollment == null ? "" : latestEnrollment.get("expiry")));
         item.put("courseStatus", courseStatusForUser(userId));
         item.put("studentName", firstNonBlank(latest == null ? "" : latest.get("studentName"), user.get("studentName"), user.get("name")));
@@ -6195,6 +6256,8 @@ public class CourseApiController
                 "courseId", courseId,
                 "courseTitle", course == null ? courseId : stripCourseYear(course.get("courseName")),
                 "expiresAt", enrollment.get("expiry"),
+                "cardCode", enrollment.get("cardCode"),
+                "source", enrollment.get("source"),
                 "progress", progress > 0 ? progress + "%" : "暂无",
                 "attempts", attemptCountForCourse(userId, courseId),
                 "averageScore", averageScoreForCourse(userId, courseId)
@@ -6301,6 +6364,12 @@ public class CourseApiController
     private static Map<String, Object> findCourse(String id)
     {
         return findById(courses, id);
+    }
+
+    private static boolean isFullCourse(String id)
+    {
+        Map<String, Object> course = findCourse(id);
+        return course != null && "full".equals(course.get("kind"));
     }
 
     private static Map<String, Object> findById(List<Map<String, Object>> list, String id)
