@@ -4522,13 +4522,19 @@ public class CourseApiController
         for (Map<String, Object> attempt : copy)
         {
             int wrong = Math.max(0, intValue(attempt.get("total")) - intValue(attempt.get("correct")));
+            Object practiceTime = attempt.get("createdAt");
             rows.add(map(
+                "id", attempt.get("id"),
                 "title", attempt.get("title"),
                 "type", attempt.get("type"),
                 "score", attempt.get("score"),
                 "averageScore", attempt.get("score"),
+                "total", attempt.get("total"),
+                "correct", attempt.get("correct"),
                 "wrongCount", wrong,
-                "createdAt", attempt.get("createdAt")
+                "createdAt", practiceTime,
+                "completedAt", practiceTime,
+                "practiceTime", practiceTime
             ));
             if (rows.size() >= 8)
             {
