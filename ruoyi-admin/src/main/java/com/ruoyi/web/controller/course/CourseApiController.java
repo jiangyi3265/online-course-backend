@@ -22,6 +22,7 @@ import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -1381,6 +1382,7 @@ public class CourseApiController
         return AjaxResult.success(order);
     }
 
+    @PreAuthorize("@ss.hasAnyPermi('" + CourseAdminPermissions.ANY_ACCESS + "')")
     @GetMapping("/admin/dashboard")
     public AjaxResult dashboard()
     {
@@ -1405,12 +1407,14 @@ public class CourseApiController
         ));
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_SETTINGS_VIEW + "')")
     @GetMapping("/admin/settings")
     public AjaxResult adminFrontendSettings()
     {
         return AjaxResult.success(copyFrontendSettings());
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_SETTINGS_EDIT + "')")
     @PostMapping("/admin/settings")
     public AjaxResult saveAdminFrontendSettings(@RequestBody Map<String, Object> body)
     {
@@ -1424,12 +1428,14 @@ public class CourseApiController
         }
     }
 
+    @PreAuthorize("@ss.hasAnyPermi('" + CourseAdminPermissions.COURSE_OPTIONS_ACCESS + "')")
     @GetMapping("/admin/courses")
     public AjaxResult adminCourses(@RequestParam Map<String, String> params)
     {
         return AjaxResult.success(filteredCourses(params));
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_COURSES_ADD + "')")
     @PostMapping("/admin/courses")
     public AjaxResult addCourse(@RequestBody Map<String, Object> course)
     {
@@ -1444,6 +1450,7 @@ public class CourseApiController
         return AjaxResult.success(course);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_COURSES_EDIT + "')")
     @PutMapping("/admin/courses/{id}")
     public AjaxResult updateCourse(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1460,6 +1467,7 @@ public class CourseApiController
         return AjaxResult.success(course);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_COURSES_REMOVE + "')")
     @DeleteMapping("/admin/courses/{id}")
     public AjaxResult deleteCourse(@PathVariable String id)
     {
@@ -1470,6 +1478,7 @@ public class CourseApiController
         return AjaxResult.success();
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_DOCS_LIST + "')")
     @GetMapping("/admin/docs")
     public AjaxResult adminDocs()
     {
@@ -1485,6 +1494,7 @@ public class CourseApiController
         return AjaxResult.success(docs);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_DOCS_ADD + "')")
     @PostMapping("/admin/docs")
     public AjaxResult addDoc(@RequestBody Map<String, Object> doc)
     {
@@ -1507,6 +1517,7 @@ public class CourseApiController
         return AjaxResult.success(doc);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_DOCS_EDIT + "')")
     @PutMapping("/admin/docs/{id}")
     public AjaxResult updateDoc(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1527,6 +1538,7 @@ public class CourseApiController
         return AjaxResult.success(doc);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_DOCS_REMOVE + "')")
     @DeleteMapping("/admin/docs/{id}")
     public AjaxResult deleteDoc(@PathVariable String id)
     {
@@ -1537,6 +1549,7 @@ public class CourseApiController
         return AjaxResult.success();
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_QUESTIONS_LIST + "')")
     @GetMapping("/admin/questions")
     public AjaxResult adminQuestions()
     {
@@ -1547,6 +1560,7 @@ public class CourseApiController
         return AjaxResult.success(questions);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_QUESTIONS_ADD + "')")
     @PostMapping("/admin/questions")
     public AjaxResult addQuestion(@RequestBody Map<String, Object> question)
     {
@@ -1561,6 +1575,7 @@ public class CourseApiController
         return AjaxResult.success(question);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_QUESTIONS_EDIT + "')")
     @PutMapping("/admin/questions/{id}")
     public AjaxResult updateQuestion(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1577,6 +1592,7 @@ public class CourseApiController
         return AjaxResult.success(question);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_QUESTIONS_REMOVE + "')")
     @DeleteMapping("/admin/questions/{id}")
     public AjaxResult deleteQuestion(@PathVariable String id)
     {
@@ -1587,6 +1603,7 @@ public class CourseApiController
         return AjaxResult.success();
     }
 
+    @PreAuthorize("@ss.hasAnyPermi('" + CourseAdminPermissions.USER_OPTIONS_ACCESS + "')")
     @GetMapping("/admin/users")
     public AjaxResult adminUsers()
     {
@@ -1602,6 +1619,7 @@ public class CourseApiController
         return AjaxResult.success(list);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_USERS_EDIT + "')")
     @PutMapping("/admin/users/{id}/role")
     public AjaxResult updateUserRole(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1644,6 +1662,7 @@ public class CourseApiController
         return AjaxResult.success(publicUser(user));
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_LIST + "')")
     @GetMapping("/admin/activation-codes")
     public AjaxResult adminActivationCodes()
     {
@@ -1655,6 +1674,7 @@ public class CourseApiController
         return AjaxResult.success(activationCodes);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_ADD + "')")
     @PostMapping("/admin/activation-codes")
     public AjaxResult addActivationCode(@RequestBody Map<String, Object> body)
     {
@@ -1694,6 +1714,7 @@ public class CourseApiController
         return AjaxResult.success(card);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_EDIT + "')")
     @PutMapping("/admin/activation-codes/{id}")
     public AjaxResult updateActivationCode(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1767,6 +1788,7 @@ public class CourseApiController
         return AjaxResult.success(card);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_REMOVE + "')")
     @DeleteMapping("/admin/activation-codes/{id}")
     public AjaxResult deleteActivationCode(@PathVariable String id)
     {
@@ -1786,6 +1808,7 @@ public class CourseApiController
         return AjaxResult.success();
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_CLOSE + "')")
     @PutMapping("/admin/activation-codes/{id}/close-authorization")
     public AjaxResult closeActivationCodeAuthorization(@PathVariable String id)
     {
@@ -1815,6 +1838,7 @@ public class CourseApiController
         return AjaxResult.success(card);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_ORDERS_ADD + "')")
     @PostMapping("/admin/activate")
     public AjaxResult adminActivate(@RequestBody Map<String, Object> body)
     {
@@ -1879,24 +1903,28 @@ public class CourseApiController
         return AjaxResult.success(order);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_AGENCIES_LIST + "')")
     @GetMapping("/admin/agencies/{id}/summary")
     public AjaxResult agencySummary(@PathVariable String id)
     {
         return AjaxResult.success(agencySummaryData(id));
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_AGENCIES_LIST + "')")
     @GetMapping("/admin/agencies/summary")
     public AjaxResult agenciesSummary()
     {
         return AjaxResult.success(agencyStats());
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_AUTH_LIST + "')")
     @GetMapping("/admin/auth-requests")
     public AjaxResult adminAuthRequests()
     {
         return AjaxResult.success(authRequests);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_AUTH_EDIT + "')")
     @PutMapping("/admin/auth-requests/{id}")
     public AjaxResult handleAuthRequest(@PathVariable String id, @RequestBody Map<String, Object> body)
     {
@@ -1924,6 +1952,7 @@ public class CourseApiController
         return AjaxResult.success(request);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_ORDERS_LIST + "')")
     @GetMapping("/admin/orders")
     public AjaxResult adminOrders()
     {
@@ -1935,6 +1964,7 @@ public class CourseApiController
         return AjaxResult.success(orders);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_ORDERS_ADD + "')")
     @PostMapping("/admin/orders")
     public AjaxResult adminCreateOrder(@RequestBody Map<String, Object> body)
     {
@@ -1964,6 +1994,7 @@ public class CourseApiController
         return AjaxResult.success(order);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_ORDERS_CLOSE + "')")
     @PutMapping("/admin/orders/{id}/close")
     public AjaxResult closeOrder(@PathVariable String id)
     {
@@ -1981,6 +2012,7 @@ public class CourseApiController
         return AjaxResult.success(order);
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_STUDY_LIST + "')")
     @GetMapping("/admin/study")
     public AjaxResult adminStudy()
     {

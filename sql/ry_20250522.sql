@@ -140,6 +140,45 @@ create table sys_menu (
 -- 菜单表为空，你可以在这里添加自己的业务菜单，示例：
 -- insert into sys_menu values(2000, '我的业务', '0', '1', 'business', null, '', '', 1, 0, 'M', '0', '0', '', 'guide', 'admin', sysdate(), '', null, '');
 
+insert into sys_menu values(2000, '课程后台', 0, 1, 'course', null, '', 'Course', 1, 0, 'M', '0', '0', '', 'education', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2001, '课程上传与用户', 2000, 1, 'manage', 'course/manage/index', '', 'CourseManage', 1, 0, 'C', '0', '0', 'course:manage:view', 'education', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2010, '前端配置-view', 2001, 2010, '', '', '', '', 1, 0, 'F', '0', '0', 'course:settings:view', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2011, '前端配置-edit', 2001, 2010, '', '', '', '', 1, 0, 'F', '0', '0', 'course:settings:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2020, '课程管理-list', 2001, 2020, '', '', '', '', 1, 0, 'F', '0', '0', 'course:courses:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2021, '课程管理-add', 2001, 2020, '', '', '', '', 1, 0, 'F', '0', '0', 'course:courses:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2022, '课程管理-edit', 2001, 2020, '', '', '', '', 1, 0, 'F', '0', '0', 'course:courses:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2023, '课程管理-remove', 2001, 2020, '', '', '', '', 1, 0, 'F', '0', '0', 'course:courses:remove', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2030, '资料管理-list', 2001, 2030, '', '', '', '', 1, 0, 'F', '0', '0', 'course:docs:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2031, '资料管理-add', 2001, 2030, '', '', '', '', 1, 0, 'F', '0', '0', 'course:docs:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2032, '资料管理-edit', 2001, 2030, '', '', '', '', 1, 0, 'F', '0', '0', 'course:docs:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2033, '资料管理-remove', 2001, 2030, '', '', '', '', 1, 0, 'F', '0', '0', 'course:docs:remove', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2040, '题库管理-list', 2001, 2040, '', '', '', '', 1, 0, 'F', '0', '0', 'course:questions:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2041, '题库管理-add', 2001, 2040, '', '', '', '', 1, 0, 'F', '0', '0', 'course:questions:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2042, '题库管理-edit', 2001, 2040, '', '', '', '', 1, 0, 'F', '0', '0', 'course:questions:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2043, '题库管理-remove', 2001, 2040, '', '', '', '', 1, 0, 'F', '0', '0', 'course:questions:remove', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2050, '授权开通-list', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:orders:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2051, '授权开通-add', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:orders:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2052, '授权开通-edit', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:orders:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2053, '授权开通-close', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:orders:close', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2054, '授权开通-auth-list', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:auth:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2055, '授权开通-auth-edit', 2001, 2050, '', '', '', '', 1, 0, 'F', '0', '0', 'course:auth:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2060, '用户管理-list', 2001, 2060, '', '', '', '', 1, 0, 'F', '0', '0', 'course:users:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2061, '用户管理-edit', 2001, 2060, '', '', '', '', 1, 0, 'F', '0', '0', 'course:users:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2070, '激活码管理-list', 2001, 2070, '', '', '', '', 1, 0, 'F', '0', '0', 'course:codes:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2071, '激活码管理-add', 2001, 2070, '', '', '', '', 1, 0, 'F', '0', '0', 'course:codes:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2072, '激活码管理-edit', 2001, 2070, '', '', '', '', 1, 0, 'F', '0', '0', 'course:codes:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2073, '激活码管理-remove', 2001, 2070, '', '', '', '', 1, 0, 'F', '0', '0', 'course:codes:remove', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2074, '激活码管理-close', 2001, 2070, '', '', '', '', 1, 0, 'F', '0', '0', 'course:codes:close', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2080, '校区管理-list', 2001, 2080, '', '', '', '', 1, 0, 'F', '0', '0', 'course:agencies:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2081, '校区管理-edit', 2001, 2080, '', '', '', '', 1, 0, 'F', '0', '0', 'course:agencies:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2090, '后台记录查看-list', 2001, 2090, '', '', '', '', 1, 0, 'F', '0', '0', 'course:study:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2100, '课程打分统计-list', 2001, 2100, '', '', '', '', 1, 0, 'F', '0', '0', 'course:ratings:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2110, '外语词汇系统-view', 2001, 2110, '', '', '', '', 1, 0, 'F', '0', '0', 'course:vocabulary:view', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2120, '后台小号管理-list', 2001, 2120, '', '', '', '', 1, 0, 'F', '0', '0', 'course:subAccounts:list', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2121, '后台小号管理-add', 2001, 2120, '', '', '', '', 1, 0, 'F', '0', '0', 'course:subAccounts:add', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2122, '后台小号管理-edit', 2001, 2120, '', '', '', '', 1, 0, 'F', '0', '0', 'course:subAccounts:edit', '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values(2123, '后台小号管理-remove', 2001, 2120, '', '', '', '', 1, 0, 'F', '0', '0', 'course:subAccounts:remove', '#', 'admin', sysdate(), '', null, '');
+
 
 -- ----------------------------
 -- 6、用户和角色关联表（框架必须）
