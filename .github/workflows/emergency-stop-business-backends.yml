@@ -34,10 +34,46 @@ jobs:
             "/www/wwwroot/dyjava/dy.jar"
           )
 
+          UNIT_DIRS=(
+            "/etc/systemd/system"
+            "/usr/lib/systemd/system"
+            "/lib/systemd/system"
+          )
+
+          find_units_for_target() {
+            target="$1"
+            for dir in "${UNIT_DIRS[@]}"; do
+              [ -d "$dir" ] || continue
+              grep -RIl -- "$target" "$dir" 2>/dev/null || true
+            done | sed 's#^\./##' | sort -u
+          }
+
           echo "::group::before"
           date
           ps -eo pid,ppid,pcpu,pmem,etime,args --sort=-pcpu | grep -E 'java|PID' | grep -v grep || true
           ss -lntp | grep -E ':(8007|8082|9090|3306|6379)' || true
+          echo "::endgroup::"
+
+          echo "::group::disable non-wangke services"
+          systemctl daemon-reload || true
+          for target in "${TARGETS[@]}"; do
+            units="$(find_units_for_target "$target" || true)"
+            if [ -z "$units" ]; then
+              echo "no systemd unit found for $target"
+              continue
+            fi
+            while IFS= read -r unit_file; do
+              [ -n "$unit_file" ] || continue
+              unit_name="$(basename "$unit_file")"
+              if [ "$unit_name" = "wangkejava.service" ]; then
+                echo "skip wangke service $unit_name"
+                continue
+              fi
+              echo "stop+disable $unit_name for $target ($unit_file)"
+              systemctl stop "$unit_name" || true
+              systemctl disable "$unit_name" || true
+            done <<< "$units"
+          done
           echo "::endgroup::"
 
           for target in "${TARGETS[@]}"; do
