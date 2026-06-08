@@ -991,7 +991,7 @@ public class CourseApiController
             "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "stemFileUrl", question.get("stemFileUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "stemAudioUrl", question.get("stemAudioUrl"), "stemFileUrl", question.get("stemFileUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct && !manualReview)
@@ -1005,6 +1005,7 @@ public class CourseApiController
                 "type", "favorite",
                 "stem", question.get("stem"),
                 "stemImageUrl", question.get("stemImageUrl"),
+                "stemAudioUrl", question.get("stemAudioUrl"),
                 "stemFileUrl", question.get("stemFileUrl"),
                 "options", question.get("options"),
                 "optionImageUrls", question.get("optionImageUrls"),
@@ -1660,7 +1661,11 @@ public class CourseApiController
         putIfPresent(user, body, "region");
         putIfPresent(user, body, "recentExamScore");
         putIfPresent(user, body, "remark");
-        if (body.containsKey("expiresAt"))
+        if (body.containsKey("activatedCourses"))
+        {
+            updateUserActivatedCourses(id, body.get("activatedCourses"));
+        }
+        else if (body.containsKey("expiresAt"))
         {
             updateUserCourseExpiry(id, str(body.get("expiresAt")).trim());
         }
@@ -3129,6 +3134,7 @@ public class CourseApiController
                         "sourceType", sourceLabel(type),
                         "stem", q.get("stem"),
                         "stemImageUrl", q.get("stemImageUrl"),
+                        "stemAudioUrl", q.get("stemAudioUrl"),
                         "stemFileUrl", q.get("stemFileUrl"),
                         "options", q.get("options"),
                         "optionImageUrls", q.get("optionImageUrls"),
@@ -3156,7 +3162,7 @@ public class CourseApiController
                     recordWrongQuestion(wrong, user);
                 }
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "stemFileUrl", q.get("stemFileUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "answerFileUrl", str(q.get("answerFileUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "analysisFileUrl", q.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(q)));
+            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "stemAudioUrl", q.get("stemAudioUrl"), "stemFileUrl", q.get("stemFileUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "answerFileUrl", str(q.get("answerFileUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "analysisFileUrl", q.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(q)));
             Map<String, Object> detail = details.get(details.size() - 1);
             detail.put("sourceWrongId", sourceWrongId);
             detail.put("selectedText", selectedText);
@@ -3373,6 +3379,11 @@ public class CourseApiController
         {
             question.put("stemImageUrl", stemImageUrl);
         }
+        String stemAudioUrl = firstNonBlank(question.get("stemAudioUrl"), question.get("questionAudioUrl"), question.get("audioUrl"), question.get("stemAudio"));
+        if (stemAudioUrl.length() > 0)
+        {
+            question.put("stemAudioUrl", stemAudioUrl);
+        }
         String stemFileUrl = firstNonBlank(question.get("stemFileUrl"), question.get("questionFileUrl"), question.get("stemFile"));
         if (stemFileUrl.length() > 0)
         {
@@ -3585,6 +3596,7 @@ public class CourseApiController
             "sourceType", attempt.get("sourceType"),
             "stem", detail.get("stem"),
             "stemImageUrl", detail.get("stemImageUrl"),
+            "stemAudioUrl", detail.get("stemAudioUrl"),
             "stemFileUrl", detail.get("stemFileUrl"),
             "options", question == null ? new ArrayList<Object>() : question.get("options"),
             "optionImageUrls", question == null ? detail.get("optionImageUrls") : question.get("optionImageUrls"),
@@ -3778,6 +3790,7 @@ public class CourseApiController
     {
         String seed = normalizeQuestionText(question.get("stem")) + "|"
             + normalizeQuestionText(question.get("stemImageUrl")) + "|"
+            + normalizeQuestionText(question.get("stemAudioUrl")) + "|"
             + normalizeQuestionText(question.get("questionType")) + "|"
             + normalizeQuestionText(question.get("options")) + "|"
             + normalizeQuestionText(question.get("optionImageUrls")) + "|"
@@ -3835,7 +3848,7 @@ public class CourseApiController
     {
         for (String key : Arrays.asList(
             "questionId", "questionKey", "sourceWrongId", "originType", "courseId", "courseTitle", "subjectTitle",
-            "title", "type", "sourceType", "stem", "stemImageUrl", "stemFileUrl", "options", "optionImageUrls", "answer", "answerText",
+            "title", "type", "sourceType", "stem", "stemImageUrl", "stemAudioUrl", "stemFileUrl", "options", "optionImageUrls", "answer", "answerText",
             "answerImageUrl", "answerFileUrl", "selected", "selectedText", "studentAnswerImageUrl", "analysis", "analysisImageUrl",
             "analysisFileUrl",
             "videoAnalysisUrl", "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
@@ -4168,6 +4181,7 @@ public class CourseApiController
                 "total", total,
                 "stem", detail.get("stem"),
                 "stemImageUrl", detail.get("stemImageUrl"),
+                "stemAudioUrl", detail.get("stemAudioUrl"),
                 "stemFileUrl", detail.get("stemFileUrl"),
                 "optionImageUrls", detail.get("optionImageUrls"),
                 "questionType", type,
@@ -4293,6 +4307,7 @@ public class CourseApiController
             "id", wrong.get("questionId"),
             "stem", wrong.get("stem"),
             "stemImageUrl", wrong.get("stemImageUrl"),
+            "stemAudioUrl", wrong.get("stemAudioUrl"),
             "stemFileUrl", wrong.get("stemFileUrl"),
             "questionType", wrong.get("questionType"),
             "options", wrong.get("options"),
@@ -5894,6 +5909,81 @@ public class CourseApiController
         }
     }
 
+    private static void updateUserActivatedCourses(String userId, Object value)
+    {
+        if (userId.length() == 0 || !(value instanceof List))
+        {
+            return;
+        }
+        for (Object item : (List<?>) value)
+        {
+            if (!(item instanceof Map))
+            {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> course = (Map<String, Object>) item;
+            updateUserActivatedCourse(userId, course);
+        }
+    }
+
+    private static void updateUserActivatedCourse(String userId, Map<String, Object> course)
+    {
+        String courseId = str(course.get("courseId")).trim();
+        if (courseId.length() == 0)
+        {
+            return;
+        }
+        String cardCode = normalizeCardCode(course.get("cardCode"));
+        String expiresAt = str(course.get("expiresAt")).trim();
+        boolean hasExpiry = course.containsKey("expiresAt") && expiresAt.length() > 0;
+        boolean hasScore = course.containsKey("recentExamScore");
+        String recentExamScore = str(course.get("recentExamScore")).trim();
+
+        Map<String, Object> enrollment = findEnrollment(userId, courseId, cardCode);
+        Map<String, Object> order = latestOrderForUserCourse(userId, courseId, cardCode);
+        Map<String, Object> card = cardCode.length() == 0 ? null : findActivationCode(cardCode);
+
+        if (hasExpiry)
+        {
+            if (enrollment != null)
+            {
+                enrollment.put("expiry", expiresAt);
+                if ("expired".equals(enrollment.get("status")) && !isExpired(expiresAt))
+                {
+                    enrollment.put("status", "active");
+                }
+            }
+            if (order != null)
+            {
+                order.put("expiresAt", expiresAt);
+                if ("expired".equals(order.get("status")) && !isExpired(expiresAt))
+                {
+                    order.put("status", "activated");
+                }
+            }
+            if (card != null)
+            {
+                card.put("expiresAt", expiresAt);
+            }
+        }
+        if (hasScore)
+        {
+            if (enrollment != null)
+            {
+                enrollment.put("recentExamScore", recentExamScore);
+            }
+            if (order != null)
+            {
+                order.put("recentExamScore", recentExamScore);
+            }
+            if (card != null)
+            {
+                card.put("recentExamScore", recentExamScore);
+            }
+        }
+    }
+
     private static void copyEnrollmentField(Map<String, Object> enrollment, Map<String, Object> order, String key)
     {
         if (order.containsKey(key))
@@ -5931,6 +6021,30 @@ public class CourseApiController
         {
             Map<String, Object> enrollment = enrollments.get(i);
             if (userId.equals(str(enrollment.get("userId"))) && courseId.equals(str(enrollment.get("courseId"))))
+            {
+                return enrollment;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> findEnrollment(String userId, String courseId, String cardCode)
+    {
+        String code = normalizeCardCode(cardCode);
+        if (code.length() == 0)
+        {
+            return findEnrollment(userId, courseId);
+        }
+        if (userId.length() == 0 || courseId.length() == 0)
+        {
+            return null;
+        }
+        for (int i = enrollments.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> enrollment = enrollments.get(i);
+            if (userId.equals(str(enrollment.get("userId")))
+                && courseId.equals(str(enrollment.get("courseId")))
+                && code.equals(normalizeCardCode(enrollment.get("cardCode"))))
             {
                 return enrollment;
             }
