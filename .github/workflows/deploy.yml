@@ -188,9 +188,9 @@ jobs:
 
           class_root = Path("ruoyi-admin/target/classes")
           source_dir = class_root / "com/ruoyi/web/controller/course"
-          classes = sorted(source_dir.glob("CourseApiController*.class"))
+          classes = sorted(source_dir.rglob("*.class"))
           if not classes:
-              raise SystemExit("CourseApiController class files were not found")
+              raise SystemExit("Course controller class files were not found")
 
           manifest = []
           with zipfile.ZipFile("backend-class-patch.zip", "w", zipfile.ZIP_DEFLATED) as patch:
