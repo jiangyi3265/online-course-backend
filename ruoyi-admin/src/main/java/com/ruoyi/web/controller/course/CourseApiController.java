@@ -1107,6 +1107,21 @@ public class CourseApiController
         return AjaxResult.success(new ArrayList<>(result.values()));
     }
 
+    @GetMapping("/app/my/agency")
+    public AjaxResult myAgency(HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        if (user == null)
+        {
+            return AjaxResult.error("请先登录");
+        }
+        if (!"agency_admin".equals(str(user.get("role"))))
+        {
+            return AjaxResult.error("当前账号不是分校区账号");
+        }
+        return AjaxResult.success(agencySummaryData(str(user.get("id"))));
+    }
+
     @PostMapping("/app/my/students/bind")
     public AjaxResult bindStudent(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
@@ -4651,13 +4666,26 @@ public class CourseApiController
             {
                 used++;
                 Map<String, Object> course = findCourse(str(card.get("courseId")));
+                String studentUserId = str(card.get("usedByUserId"));
+                Map<String, Object> student = findById(users, studentUserId);
                 usedStudents.add(map(
                     "studentName", card.get("studentName"),
+                    "usedByName", firstNonBlank(card.get("usedByName"), student == null ? "" : student.get("name"), card.get("studentName")),
+                    "userId", studentUserId,
                     "subject", course == null ? card.get("courseTitle") : course.get("title"),
                     "region", card.get("region"),
                     "activatedAt", card.get("activatedAt"),
+                    "expiresAt", card.get("expiresAt"),
                     "code", card.get("code"),
-                    "courseTitle", card.get("courseTitle")
+                    "courseId", card.get("courseId"),
+                    "courseTitle", card.get("courseTitle"),
+                    "cardType", card.get("cardType"),
+                    "cardTypeText", card.get("cardTypeText"),
+                    "durationText", card.get("durationText"),
+                    "recentExamScore", card.get("recentExamScore"),
+                    "gender", card.get("gender"),
+                    "grade", card.get("grade"),
+                    "schoolName", card.get("schoolName")
                 ));
             }
             if (activationCardLocked(card))
@@ -5541,6 +5569,7 @@ public class CourseApiController
         {
             throw new IllegalArgumentException("课程不存在");
         }
+        String time = now();
         Map<String, Object> order = map(
             "id", "order-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
@@ -5555,7 +5584,8 @@ public class CourseApiController
             "ownerUserId", ownerUserIdForCard(cardCode),
             "agencyUserId", ownerUserIdForCard(cardCode),
             "source", source,
-            "createdAt", now()
+            "createdAt", time,
+            "activatedAt", time
         );
         orders.add(order);
         if (user != null && "full".equals(course.get("kind")))
@@ -5580,7 +5610,9 @@ public class CourseApiController
                     "source", source,
                     "cardCode", cardCode,
                     "cardType", cardType,
-                    "orderId", order.get("id")
+                    "orderId", order.get("id"),
+                    "createdAt", time,
+                    "activatedAt", time
                 );
                 enrollments.add(enrollment);
                 order.put("enrollmentId", enrollment.get("id"));
@@ -5814,6 +5846,8 @@ public class CourseApiController
         copyEnrollmentField(enrollment, order, "source");
         copyEnrollmentField(enrollment, order, "ownerUserId");
         copyEnrollmentField(enrollment, order, "agencyUserId");
+        copyEnrollmentField(enrollment, order, "createdAt");
+        copyEnrollmentField(enrollment, order, "activatedAt");
         enrollment.put("expiry", order.get("expiresAt"));
         enrollment.put("orderId", order.get("id"));
         enrollment.put("status", "active");
@@ -6289,19 +6323,50 @@ public class CourseApiController
             }
             String courseId = str(enrollment.get("courseId"));
             Map<String, Object> course = findCourse(courseId);
+            String cardCode = str(enrollment.get("cardCode"));
+            Map<String, Object> order = latestOrderForUserCourse(userId, courseId, cardCode);
             int progress = averageProgressForCourse(userId, courseId);
             result.add(map(
                 "courseId", courseId,
                 "courseTitle", course == null ? courseId : stripCourseYear(course.get("courseName")),
                 "expiresAt", enrollment.get("expiry"),
-                "cardCode", enrollment.get("cardCode"),
-                "source", enrollment.get("source"),
+                "activatedAt", firstNonBlank(enrollment.get("activatedAt"), order == null ? "" : order.get("activatedAt"), order == null ? "" : order.get("createdAt")),
+                "openedAt", firstNonBlank(enrollment.get("createdAt"), order == null ? "" : order.get("createdAt")),
+                "cardCode", cardCode,
+                "cardType", firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType")),
+                "cardTypeText", cardTypeText(firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType"))),
+                "durationText", cardDurationText(firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType"))),
+                "source", firstNonBlank(enrollment.get("source"), order == null ? "" : order.get("source")),
+                "studentName", firstNonBlank(enrollment.get("studentName"), order == null ? "" : order.get("studentName")),
+                "gender", firstNonBlank(enrollment.get("gender"), order == null ? "" : order.get("gender")),
+                "recentExamScore", firstNonBlank(enrollment.get("recentExamScore"), order == null ? "" : order.get("recentExamScore")),
+                "grade", firstNonBlank(enrollment.get("grade"), order == null ? "" : order.get("grade")),
+                "schoolName", firstNonBlank(enrollment.get("schoolName"), order == null ? "" : order.get("schoolName")),
+                "region", firstNonBlank(enrollment.get("region"), order == null ? "" : order.get("region")),
                 "progress", progress > 0 ? progress + "%" : "暂无",
                 "attempts", attemptCountForCourse(userId, courseId),
                 "averageScore", averageScoreForCourse(userId, courseId)
             ));
         }
         return result;
+    }
+
+    private static Map<String, Object> latestOrderForUserCourse(String userId, String courseId, String cardCode)
+    {
+        String code = normalizeCardCode(cardCode);
+        for (int i = orders.size() - 1; i >= 0; i--)
+        {
+            Map<String, Object> order = orders.get(i);
+            if (!userId.equals(str(order.get("userId"))) || !courseId.equals(str(order.get("courseId"))))
+            {
+                continue;
+            }
+            if (code.length() == 0 || code.equals(normalizeCardCode(order.get("cardCode"))))
+            {
+                return order;
+            }
+        }
+        return null;
     }
 
     private static int averageProgressForUser(String userId)
