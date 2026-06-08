@@ -1,0 +1,137 @@
+name: Emergency Recover Backend
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recover-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          cat > ~/.ssh/deploy_key <<'SSH_KEY'
+          ${{ secrets.SERVER_SSH_KEY }}
+          SSH_KEY
+          grep -q "PRIVATE KEY" ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Restart database and backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p 22 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o ConnectionAttempts=1 -o ServerAliveInterval=10 -o ServerAliveCountMax=2"
+          timeout 480s ssh $SSH_OPTS root@101.42.94.41 "bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_DIR="/www/wwwroot/wangkejava"
+          APP_NAME="wangkejava.jar"
+          APP_PORT="8007"
+
+          port_open() {
+            ss -lnt | awk '{print $4}' | grep -Eq "(^|:)${1}$"
+          }
+
+          wait_port() {
+            port="$1"
+            seconds="$2"
+            for _ in $(seq 1 "$seconds"); do
+              if port_open "$port"; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
+          echo "::group::precheck"
+          date
+          uptime || true
+          free -m || true
+          ss -lntp | grep -E "(:3306|:$APP_PORT|:6379)" || true
+          pgrep -af "$APP_DIR/$APP_NAME" || true
+          echo "::endgroup::"
+
+          if ! port_open 3306; then
+            echo "::group::restart mysql"
+            for cmd in "systemctl restart mysqld.service" "/etc/init.d/mysqld restart" "service mysqld restart"; do
+              echo "trying: $cmd"
+              sh -lc "$cmd" || true
+              if wait_port 3306 40; then
+                break
+              fi
+            done
+            ss -lntp | grep ":3306" || true
+            if ! port_open 3306; then
+              echo "MySQL still is not listening on 3306"
+              journalctl -u mysqld.service -n 120 --no-pager || true
+              for f in /www/server/mysql/*.err /www/server/data/*.err /var/log/mysql*.log; do
+                [ -f "$f" ] || continue
+                echo "--- $f ---"
+                tail -n 120 "$f"
+              done
+              exit 2
+            fi
+            echo "::endgroup::"
+          fi
+
+          echo "::group::restart backend"
+          PID="$(pgrep -f "$APP_DIR/$APP_NAME" || true)"
+          if [ -n "$PID" ]; then
+            echo "stopping backend pid(s): $PID"
+            kill -TERM $PID || true
+            sleep 8
+            PID="$(pgrep -f "$APP_DIR/$APP_NAME" || true)"
+            if [ -n "$PID" ]; then
+              kill -KILL $PID || true
+              sleep 2
+            fi
+          fi
+
+          if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl restart wangkejava.service || true
+          fi
+
+          sleep 5
+          if ! pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1; then
+            if [ -x "$APP_DIR/run-wangkejava.sh" ]; then
+              nohup "$APP_DIR/run-wangkejava.sh" >/dev/null 2>&1 &
+            else
+              JAVA_BIN="/usr/lib/jvm/java-17-konajdk/bin/java"
+              [ -x "$JAVA_BIN" ] || JAVA_BIN="$(command -v java)"
+              mkdir -p "$APP_DIR/logs" "$APP_DIR/uploadPath"
+              nohup "$JAVA_BIN" -Dname="$APP_NAME" -Duser.timezone=Asia/Shanghai -Xms512m -Xmx1024m -jar "$APP_DIR/$APP_NAME" --ruoyi.profile="$APP_DIR/uploadPath" --server.port="$APP_PORT" > "$APP_DIR/logs/${APP_NAME%.jar}.log" 2>&1 &
+            fi
+          fi
+
+          for i in $(seq 1 90); do
+            if curl -fsS -m 8 "http://127.0.0.1:$APP_PORT/captchaImage" | head -c 220; then
+              echo
+              echo "backend is healthy"
+              ss -lntp | grep ":$APP_PORT" || true
+              echo "::endgroup::"
+              exit 0
+            fi
+            if [ "$i" = "20" ] || [ "$i" = "45" ] || [ "$i" = "70" ]; then
+              echo "waiting backend attempt $i"
+              pgrep -af "$APP_DIR/$APP_NAME" || true
+              ss -lntp | grep -E "(:3306|:$APP_PORT)" || true
+            fi
+            sleep 2
+          done
+
+          echo "backend did not become healthy"
+          systemctl status wangkejava.service --no-pager -l || true
+          tail -n 180 "$APP_DIR/logs/wangkejava.log" || true
+          echo "::endgroup::"
+          exit 1
+          REMOTE
+
+      - name: Public health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -kfsS --max-time 20 https://wkht.oksja.cn/prod-api/captchaImage | head -c 220
+          echo
