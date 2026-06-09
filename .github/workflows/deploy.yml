@@ -187,10 +187,17 @@ jobs:
           import zipfile
 
           class_root = Path("ruoyi-admin/target/classes")
-          source_dir = class_root / "com/ruoyi/web/controller/course"
-          classes = sorted(source_dir.rglob("*.class"))
+          patch_dirs = [
+              class_root / "com/ruoyi/web/controller/course",
+              class_root / "com/ruoyi/common/utils/file",
+          ]
+          classes = sorted(
+              path
+              for source_dir in patch_dirs
+              for path in source_dir.rglob("*.class")
+          )
           if not classes:
-              raise SystemExit("Course controller class files were not found")
+              raise SystemExit("Backend class patch files were not found")
 
           manifest = []
           with zipfile.ZipFile("backend-class-patch.zip", "w", zipfile.ZIP_DEFLATED) as patch:

@@ -3,6 +3,7 @@ package com.ruoyi.common.utils.file;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Paths;
+import java.util.Locale;
 import java.util.Objects;
 import org.apache.commons.io.FilenameUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -232,9 +233,10 @@ public class FileUploadUtils
      */
     public static final boolean isAllowedExtension(String extension, String[] allowedExtension)
     {
+        String normalizedExtension = normalizeUploadExtension(extension);
         for (String str : allowedExtension)
         {
-            if (str.equalsIgnoreCase(extension))
+            if (normalizeUploadExtension(str).equals(normalizedExtension))
             {
                 return true;
             }
@@ -255,6 +257,26 @@ public class FileUploadUtils
         {
             extension = MimeTypeUtils.getExtension(Objects.requireNonNull(file.getContentType()));
         }
-        return extension;
+        return normalizeUploadExtension(extension);
+    }
+
+    /**
+     * Normalize extensions before comparing. Some browser/IM exported files can
+     * include invisible control characters around the suffix, especially audio
+     * files selected from local chat temp folders.
+     */
+    private static String normalizeUploadExtension(String extension)
+    {
+        if (extension == null)
+        {
+            return "";
+        }
+        String normalized = extension.trim();
+        while (normalized.startsWith("."))
+        {
+            normalized = normalized.substring(1).trim();
+        }
+        normalized = normalized.replaceAll("[\\p{Cntrl}\\p{Cf}\\s]+", "");
+        return normalized.toLowerCase(Locale.ROOT);
     }
 }

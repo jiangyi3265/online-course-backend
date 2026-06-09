@@ -911,7 +911,8 @@ public class CourseApiController
                 Map<String, Object> question = findById(questions, str(favorite.get("targetId")));
                 if (question != null)
                 {
-                    Map<String, Object> item = new LinkedHashMap<>(question);
+                    normalizeQuestion(question);
+                    Map<String, Object> item = publicQuestions(list(question)).get(0);
                     item.put("favoriteId", favorite.get("id"));
                     item.put("createdAt", favorite.get("createdAt"));
                     questionItems.add(item);
@@ -973,6 +974,11 @@ public class CourseApiController
         if (question == null)
         {
             return AjaxResult.error("题目不存在");
+        }
+        normalizeQuestion(question);
+        if (isReadingQuestion(question))
+        {
+            return AjaxResult.error("阅读理解题包含多个小题，请在练习页完成作答");
         }
         Object submitted = body.containsKey("answer") ? body.get("answer") : body.get("selected");
         String questionType = questionType(question);
@@ -1353,11 +1359,8 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码已使用或已关闭");
         }
-        String courseId = str(body.get("courseId")).trim();
-        if (courseId.length() == 0)
-        {
-            courseId = str(card.get("courseId")).trim();
-        }
+        String cardCourseId = str(card.get("courseId")).trim();
+        String courseId = cardCourseId.length() > 0 ? cardCourseId : str(body.get("courseId")).trim();
         if (courseId.length() == 0)
         {
             return AjaxResult.error("请选择要开通的课程");
@@ -1712,7 +1715,7 @@ public class CourseApiController
             return AjaxResult.error("激活码已存在");
         }
         String courseId = str(body.get("courseId")).trim();
-        if (!isFullCourse(courseId))
+        if (courseId.length() > 0 && !isFullCourse(courseId))
         {
             return AjaxResult.error("激活码只能绑定正式课程");
         }
@@ -1793,7 +1796,8 @@ public class CourseApiController
                 }
                 putIfPresent(card, body, "ownerUserId");
             }
-            if (body.containsKey("courseId") && !isFullCourse(str(body.get("courseId")).trim()))
+            String nextCourseId = str(body.get("courseId")).trim();
+            if (body.containsKey("courseId") && nextCourseId.length() > 0 && !isFullCourse(nextCourseId))
             {
                 return AjaxResult.error("激活码只能绑定正式课程");
             }
@@ -1881,7 +1885,8 @@ public class CourseApiController
         {
             return AjaxResult.error("激活码已使用或已锁定，不能激活");
         }
-        String courseId = str(body.get("courseId")).trim();
+        String cardCourseId = str(card.get("courseId")).trim();
+        String courseId = cardCourseId.length() > 0 ? cardCourseId : str(body.get("courseId")).trim();
         if (courseId.length() == 0)
         {
             return AjaxResult.error("请选择要开通的课程");
@@ -3076,102 +3081,32 @@ public class CourseApiController
         int index = 0;
         for (Map<String, Object> q : source)
         {
-            String questionId = str(q.get("id"));
-            Object submitted = answers.get(q.get("id"));
-            String questionType = questionType(q);
-            boolean skippedQuestion = boolValue(skipped.get(questionId), false);
-            boolean noUpload = boolValue(noUploads.get(questionId), false);
-            String selfReviewResult = selfReviews.containsKey(questionId) ? normalizeReviewResult(selfReviews.get(questionId), null) : "";
-            boolean reviewedManually = selfReviewResult.length() > 0;
-            boolean manualReview = isSelfReviewQuestion(q) && !skippedQuestion && !reviewedManually;
-            boolean partial = "partial".equals(selfReviewResult);
-            boolean ok = reviewedManually ? "correct".equals(selfReviewResult) : (!manualReview && !skippedQuestion && questionAnswerMatches(q, submitted));
-            int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
-            String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : firstNonBlank(str(submitted).trim(), noUpload ? "暂不上传" : ""));
-            String answerText = correctAnswerText(q);
-            String studentAnswerImageUrl = str(answerImages.get(questionId)).trim();
-            if (manualReview)
-            {
-                manualReviewCount++;
-            }
-            else
-            {
-                gradable++;
-            }
             String sourceWrongId = index < sourceWrongIds.size() ? sourceWrongIds.get(index) : "";
-            Map<String, Object> sourceWrong = sourceWrongId.length() == 0 ? null : findById(wrongQuestions, sourceWrongId);
-            if (sourceWrong != null && (!sameUser(sourceWrong, user) || !courseId.equals(scopedCourseId(sourceWrong.get("courseId")))))
+            normalizeQuestion(q);
+            if (isReadingQuestion(q))
             {
-                sourceWrong = null;
-                sourceWrongId = "";
-            }
-            String originType = sourceWrong == null ? str(payload.get("originType")) : str(sourceWrong.get("type"));
-            if (ok)
-            {
-                correct++;
-                earned += 1d;
-            }
-            else
-            {
-                if (partial)
+                List<Map<String, Object>> subs = normalizeReadingSubQuestions(q);
+                for (int subIndex = 0; subIndex < subs.size(); subIndex++)
                 {
-                    earned += 0.5d;
+                    Map<String, Object> graded = gradeQuestionItem(payload, user, title, type, courseId,
+                        readingChildQuestion(q, subs.get(subIndex), subIndex),
+                        answers, answerImages, skipped, noUploads, selfReviews, sourceWrongId, details.size());
+                    correct += intValue(graded.get("correctCount"));
+                    gradable += intValue(graded.get("gradableCount"));
+                    manualReviewCount += intValue(graded.get("manualReviewCount"));
+                    earned += doubleValue(graded.get("earned"));
+                    details.add(mapValue(graded.get("detail")));
                 }
-                if (!manualReview)
-                {
-                    Map<String, Object> wrong = map(
-                        "id", "wrong-" + System.currentTimeMillis() + "-" + index,
-                        "userId", user == null ? null : user.get("id"),
-                        "questionId", q.get("id"),
-                        "questionType", questionType,
-                        "sourceWrongId", sourceWrongId,
-                        "originType", originType,
-                        "courseId", payload.get("courseId"),
-                        "courseTitle", resolveCourseTitle(payload.get("courseId")),
-                        "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
-                        "title", title,
-                        "type", type,
-                        "sourceType", sourceLabel(type),
-                        "stem", q.get("stem"),
-                        "stemImageUrl", q.get("stemImageUrl"),
-                        "stemAudioUrl", q.get("stemAudioUrl"),
-                        "stemFileUrl", q.get("stemFileUrl"),
-                        "options", q.get("options"),
-                        "optionImageUrls", q.get("optionImageUrls"),
-                        "answer", q.get("answer"),
-                        "answerText", answerText,
-                        "answerImageUrl", q.get("answerImageUrl"),
-                        "answerFileUrl", q.get("answerFileUrl"),
-                        "selected", selected,
-                        "selectedText", selectedText,
-                        "studentAnswerImageUrl", studentAnswerImageUrl,
-                        "skipped", skippedQuestion,
-                        "noUpload", noUpload,
-                        "reviewResult", reviewedManually ? selfReviewResult : "",
-                        "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
-                        "analysis", q.get("analysis"),
-                        "analysisImageUrl", analysisImageUrl(q),
-                        "analysisFileUrl", q.get("analysisFileUrl"),
-                        "videoAnalysisUrl", analysisVideoUrl(q),
-                        "knowledge", q.get("knowledge"),
-                        "mastered", false,
-                        "retryCount", isWrongRetryType(type) ? 1 : 0,
-                        "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
-                        "updatedAt", now()
-                    );
-                    recordWrongQuestion(wrong, user);
-                }
+                index++;
+                continue;
             }
-            details.add(map("id", q.get("id"), "stem", q.get("stem"), "stemImageUrl", q.get("stemImageUrl"), "stemAudioUrl", q.get("stemAudioUrl"), "stemFileUrl", q.get("stemFileUrl"), "optionImageUrls", q.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(q) ? selected : selectedText, "answer", isChoiceQuestion(q) ? q.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(q.get("answerImageUrl")), "answerFileUrl", str(q.get("answerFileUrl")), "studentAnswerImageUrl", studentAnswerImageUrl, "correct", ok, "manualReview", manualReview, "selfReviewed", !manualReview, "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")), "partialCredit", partial ? 0.5d : (ok ? 1d : 0d), "skipped", skippedQuestion, "noUpload", noUpload, "analysis", q.get("analysis"), "analysisImageUrl", analysisImageUrl(q), "analysisFileUrl", q.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(q)));
-            Map<String, Object> detail = details.get(details.size() - 1);
-            detail.put("sourceWrongId", sourceWrongId);
-            detail.put("selectedText", selectedText);
-            if (isChoiceQuestion(q))
-            {
-                detail.put("answerText", optionText(q, intValue(q.get("answer"))));
-            }
-            detail.put("videoAnalysisUrl", analysisVideoUrl(q));
-            detail.put("analysisImageUrl", analysisImageUrl(q));
+            Map<String, Object> graded = gradeQuestionItem(payload, user, title, type, courseId, q,
+                answers, answerImages, skipped, noUploads, selfReviews, sourceWrongId, details.size());
+            correct += intValue(graded.get("correctCount"));
+            gradable += intValue(graded.get("gradableCount"));
+            manualReviewCount += intValue(graded.get("manualReviewCount"));
+            earned += doubleValue(graded.get("earned"));
+            details.add(mapValue(graded.get("detail")));
             index++;
         }
         updateWrongRetryStats(type, sourceWrongIds, details, user, courseId);
@@ -3184,7 +3119,7 @@ public class CourseApiController
             "title", title,
             "type", type,
             "sourceType", sourceLabel(type),
-            "total", source.size(),
+            "total", details.size(),
             "correct", correct,
             "manualReviewCount", manualReviewCount,
             "score", gradable <= 0 ? 0 : Math.round((float) (earned * 100d / gradable)),
@@ -3193,6 +3128,165 @@ public class CourseApiController
         );
         attempts.add(attempt);
         return attempt;
+    }
+
+    private static Map<String, Object> gradeQuestionItem(Map<String, Object> payload,
+                                                         Map<String, Object> user,
+                                                         String title,
+                                                         String type,
+                                                         String courseId,
+                                                         Map<String, Object> q,
+                                                         Map<String, Object> answers,
+                                                         Map<String, Object> answerImages,
+                                                         Map<String, Object> skipped,
+                                                         Map<String, Object> noUploads,
+                                                         Map<String, Object> selfReviews,
+                                                         String sourceWrongId,
+                                                         int index)
+    {
+        String questionId = str(q.get("id"));
+        Object submitted = answers.get(questionId);
+        String questionType = questionType(q);
+        boolean skippedQuestion = boolValue(skipped.get(questionId), false);
+        boolean noUpload = boolValue(noUploads.get(questionId), false);
+        String selfReviewResult = selfReviews.containsKey(questionId) ? normalizeReviewResult(selfReviews.get(questionId), null) : "";
+        boolean reviewedManually = selfReviewResult.length() > 0;
+        boolean manualReview = isSelfReviewQuestion(q) && !skippedQuestion && !reviewedManually;
+        boolean partial = "partial".equals(selfReviewResult);
+        boolean ok = reviewedManually ? "correct".equals(selfReviewResult) : (!manualReview && !skippedQuestion && questionAnswerMatches(q, submitted));
+        int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
+        String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : firstNonBlank(str(submitted).trim(), noUpload ? "暂不上传" : ""));
+        String answerText = correctAnswerText(q);
+        String studentAnswerImageUrl = str(answerImages.get(questionId)).trim();
+        int manualReviewCount = manualReview ? 1 : 0;
+        int gradableCount = manualReview ? 0 : 1;
+        int correctCount = ok ? 1 : 0;
+        double earned = ok ? 1d : (partial ? 0.5d : 0d);
+        Map<String, Object> sourceWrong = sourceWrongId.length() == 0 ? null : findById(wrongQuestions, sourceWrongId);
+        if (sourceWrong != null && (!sameUser(sourceWrong, user) || !courseId.equals(scopedCourseId(sourceWrong.get("courseId")))))
+        {
+            sourceWrong = null;
+            sourceWrongId = "";
+        }
+        String originType = sourceWrong == null ? str(payload.get("originType")) : str(sourceWrong.get("type"));
+        if (!ok && !manualReview)
+        {
+            Map<String, Object> wrong = map(
+                "id", "wrong-" + System.currentTimeMillis() + "-" + index,
+                "userId", user == null ? null : user.get("id"),
+                "questionId", q.get("id"),
+                "parentQuestionId", q.get("parentQuestionId"),
+                "questionType", questionType,
+                "sourceWrongId", sourceWrongId,
+                "originType", originType,
+                "courseId", payload.get("courseId"),
+                "courseTitle", resolveCourseTitle(payload.get("courseId")),
+                "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
+                "title", title,
+                "type", type,
+                "sourceType", sourceLabel(type),
+                "stem", wrongStemText(q),
+                "stemImageUrl", firstNonBlank(q.get("stemImageUrl"), q.get("parentStemImageUrl")),
+                "stemAudioUrl", firstNonBlank(q.get("stemAudioUrl"), q.get("parentStemAudioUrl")),
+                "stemFileUrl", firstNonBlank(q.get("stemFileUrl"), q.get("parentStemFileUrl")),
+                "options", q.get("options"),
+                "optionImageUrls", q.get("optionImageUrls"),
+                "answer", q.get("answer"),
+                "answerText", answerText,
+                "answerImageUrl", q.get("answerImageUrl"),
+                "answerFileUrl", q.get("answerFileUrl"),
+                "selected", selected,
+                "selectedText", selectedText,
+                "studentAnswerImageUrl", studentAnswerImageUrl,
+                "skipped", skippedQuestion,
+                "noUpload", noUpload,
+                "reviewResult", reviewedManually ? selfReviewResult : "",
+                "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
+                "analysis", q.get("analysis"),
+                "analysisImageUrl", analysisImageUrl(q),
+                "analysisFileUrl", q.get("analysisFileUrl"),
+                "videoAnalysisUrl", analysisVideoUrl(q),
+                "knowledge", q.get("knowledge"),
+                "mastered", false,
+                "retryCount", isWrongRetryType(type) ? 1 : 0,
+                "retryWrongCount", isWrongRetryType(type) ? 1 : 0,
+                "updatedAt", now()
+            );
+            recordWrongQuestion(wrong, user);
+        }
+        Map<String, Object> detail = map(
+            "id", q.get("id"),
+            "parentQuestionId", q.get("parentQuestionId"),
+            "parentStem", q.get("parentStem"),
+            "stem", q.get("stem"),
+            "stemImageUrl", q.get("stemImageUrl"),
+            "stemAudioUrl", q.get("stemAudioUrl"),
+            "stemFileUrl", q.get("stemFileUrl"),
+            "parentStemImageUrl", q.get("parentStemImageUrl"),
+            "parentStemAudioUrl", q.get("parentStemAudioUrl"),
+            "parentStemFileUrl", q.get("parentStemFileUrl"),
+            "optionImageUrls", q.get("optionImageUrls"),
+            "options", q.get("options"),
+            "questionType", questionType,
+            "selected", isChoiceQuestion(q) ? selected : selectedText,
+            "answer", isChoiceQuestion(q) ? q.get("answer") : answerText,
+            "answerText", isChoiceQuestion(q) ? optionText(q, intValue(q.get("answer"))) : answerText,
+            "answerImageUrl", str(q.get("answerImageUrl")),
+            "answerFileUrl", str(q.get("answerFileUrl")),
+            "studentAnswerImageUrl", studentAnswerImageUrl,
+            "correct", ok,
+            "manualReview", manualReview,
+            "selfReviewed", !manualReview,
+            "reviewResult", manualReview ? "pending" : (reviewedManually ? selfReviewResult : (ok ? "correct" : "wrong")),
+            "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
+            "skipped", skippedQuestion,
+            "noUpload", noUpload,
+            "analysis", q.get("analysis"),
+            "analysisImageUrl", analysisImageUrl(q),
+            "analysisFileUrl", q.get("analysisFileUrl"),
+            "videoAnalysisUrl", analysisVideoUrl(q),
+            "sourceWrongId", sourceWrongId,
+            "selectedText", selectedText
+        );
+        return map(
+            "correctCount", correctCount,
+            "gradableCount", gradableCount,
+            "manualReviewCount", manualReviewCount,
+            "earned", earned,
+            "detail", detail
+        );
+    }
+
+    private static Map<String, Object> readingChildQuestion(Map<String, Object> parent, Map<String, Object> sub, int index)
+    {
+        Map<String, Object> child = new LinkedHashMap<>(sub);
+        child.put("id", readingSubQuestionAnswerId(parent, sub, index));
+        child.put("parentQuestionId", parent.get("id"));
+        child.put("parentStem", parent.get("stem"));
+        child.put("parentStemImageUrl", parent.get("stemImageUrl"));
+        child.put("parentStemAudioUrl", parent.get("stemAudioUrl"));
+        child.put("parentStemFileUrl", parent.get("stemFileUrl"));
+        child.put("analysis", firstNonBlank(sub.get("analysis"), parent.get("analysis")));
+        child.put("analysisImageUrl", firstNonBlank(sub.get("analysisImageUrl"), parent.get("analysisImageUrl")));
+        child.put("analysisFileUrl", firstNonBlank(sub.get("analysisFileUrl"), parent.get("analysisFileUrl")));
+        child.put("videoAnalysisUrl", firstNonBlank(sub.get("videoAnalysisUrl"), parent.get("videoAnalysisUrl")));
+        child.put("knowledge", firstNonBlank(sub.get("knowledge"), parent.get("knowledge")));
+        return child;
+    }
+
+    private static String wrongStemText(Map<String, Object> question)
+    {
+        String parentStem = str(question.get("parentStem")).trim();
+        String stem = str(question.get("stem")).trim();
+        if (parentStem.length() == 0)
+        {
+            return stem;
+        }
+        if (stem.length() == 0)
+        {
+            return parentStem;
+        }
+        return parentStem + "\n小题：" + stem;
     }
 
     private static List<Map<String, Object>> questionsFor(String title)
@@ -3354,6 +3448,10 @@ public class CourseApiController
             item.remove("answerImageUrl");
             item.remove("answerFileUrl");
             item.remove("acceptableAnswers");
+            if (isReadingQuestion(q))
+            {
+                item.put("subQuestions", publicReadingSubQuestions(q));
+            }
             item.put("manualReview", manualReview);
             if (manualReview)
             {
@@ -3438,6 +3536,15 @@ public class CourseApiController
             question.put("answer", intValue(question.get("answer")));
             return;
         }
+        if (isReadingQuestion(question))
+        {
+            question.put("options", new ArrayList<Object>());
+            question.put("subQuestions", normalizeReadingSubQuestions(question));
+            question.remove("answer");
+            question.put("answerText", "");
+            question.put("acceptableAnswers", new ArrayList<Object>());
+            return;
+        }
         if (!(question.get("options") instanceof List))
         {
             question.put("options", new ArrayList<Object>());
@@ -3448,6 +3555,89 @@ public class CourseApiController
         {
             question.put("acceptableAnswers", answerCandidates(answerText));
         }
+    }
+
+    private static List<Map<String, Object>> normalizeReadingSubQuestions(Map<String, Object> question)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+        int index = 0;
+        for (Map<String, Object> source : mapList(question.get("subQuestions")))
+        {
+            Map<String, Object> sub = new LinkedHashMap<>(source);
+            String type = questionType(sub);
+            if ("reading".equals(type))
+            {
+                type = "choice";
+            }
+            sub.put("id", firstNonBlank(sub.get("subQuestionId"), sub.get("rawId"), sub.get("id"), "sub-" + (index + 1)));
+            sub.put("questionType", type);
+            sub.put("stem", firstNonBlank(sub.get("stem"), sub.get("question")));
+            List<String> optionImageUrls = mediaUrlList(sub.get("optionImageUrls"));
+            sub.put("optionImageUrls", optionImageUrls);
+            if ("choice".equals(type))
+            {
+                if (!(sub.get("options") instanceof List))
+                {
+                    sub.put("options", new ArrayList<Object>());
+                }
+                List<Object> options = (List<Object>) sub.get("options");
+                while (options.size() < optionImageUrls.size())
+                {
+                    options.add("");
+                }
+                sub.put("answer", intValue(sub.get("answer")));
+                sub.put("answerText", "");
+                sub.put("acceptableAnswers", new ArrayList<Object>());
+            }
+            else
+            {
+                sub.put("options", new ArrayList<Object>());
+                String answerText = valueOrDefault(sub.get("answerText"), sub.get("answer")).trim();
+                sub.put("answerText", answerText);
+                if ("fill".equals(type) && stringList(sub.get("acceptableAnswers")).isEmpty() && answerText.length() > 0)
+                {
+                    sub.put("acceptableAnswers", answerCandidates(answerText));
+                }
+            }
+            result.add(sub);
+            index++;
+        }
+        return result;
+    }
+
+    private static List<Map<String, Object>> publicReadingSubQuestions(Map<String, Object> parent)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+        List<Map<String, Object>> subs = normalizeReadingSubQuestions(parent);
+        for (int i = 0; i < subs.size(); i++)
+        {
+            Map<String, Object> source = subs.get(i);
+            Map<String, Object> item = new LinkedHashMap<>(source);
+            item.put("subQuestionId", source.get("id"));
+            item.put("id", readingSubQuestionAnswerId(parent, source, i));
+            boolean manualReview = isSelfReviewQuestion(source);
+            item.remove("answer");
+            item.remove("answerText");
+            item.remove("answerImageUrl");
+            item.remove("answerFileUrl");
+            item.remove("acceptableAnswers");
+            item.put("manualReview", manualReview);
+            if (manualReview)
+            {
+                item.put("answerText", correctAnswerText(source));
+                item.put("answerImageUrl", str(source.get("answerImageUrl")));
+                item.put("answerFileUrl", str(source.get("answerFileUrl")));
+            }
+            result.add(item);
+        }
+        return result;
+    }
+
+    private static String readingSubQuestionAnswerId(Map<String, Object> parent, Map<String, Object> sub, int index)
+    {
+        String parentId = str(parent.get("id")).trim();
+        String subId = firstNonBlank(sub.get("id"), "sub-" + (index + 1));
+        return (parentId.length() == 0 ? "reading" : parentId) + "::" + subId;
     }
 
     private static String questionType(Map<String, Object> question)
@@ -3469,7 +3659,11 @@ public class CourseApiController
         {
             return "subjective";
         }
-        if ("fill".equals(raw) || "subjective".equals(raw))
+        if ("阅读理解".equals(raw) || "阅读理解题".equals(raw) || "reading".equals(raw) || "comprehension".equals(raw))
+        {
+            return "reading";
+        }
+        if ("fill".equals(raw) || "subjective".equals(raw) || "reading".equals(raw))
         {
             return raw;
         }
@@ -3486,9 +3680,14 @@ public class CourseApiController
         return "subjective".equals(questionType(question));
     }
 
+    private static boolean isReadingQuestion(Map<String, Object> question)
+    {
+        return "reading".equals(questionType(question));
+    }
+
     private static boolean isSelfReviewQuestion(Map<String, Object> question)
     {
-        return !isChoiceQuestion(question);
+        return !isChoiceQuestion(question) && !isReadingQuestion(question);
     }
 
     private static boolean questionAnswerMatches(Map<String, Object> question, Object submitted)
@@ -3587,6 +3786,7 @@ public class CourseApiController
             "id", "wrong-" + System.currentTimeMillis() + "-" + questionId,
             "userId", user == null ? null : user.get("id"),
             "questionId", questionId,
+            "parentQuestionId", detail.get("parentQuestionId"),
             "questionType", questionType,
             "courseId", attempt.get("courseId"),
             "courseTitle", attempt.get("courseTitle"),
@@ -3594,11 +3794,11 @@ public class CourseApiController
             "title", attempt.get("title"),
             "type", attempt.get("type"),
             "sourceType", attempt.get("sourceType"),
-            "stem", detail.get("stem"),
-            "stemImageUrl", detail.get("stemImageUrl"),
-            "stemAudioUrl", detail.get("stemAudioUrl"),
-            "stemFileUrl", detail.get("stemFileUrl"),
-            "options", question == null ? new ArrayList<Object>() : question.get("options"),
+            "stem", wrongStemText(detail),
+            "stemImageUrl", firstNonBlank(detail.get("stemImageUrl"), detail.get("parentStemImageUrl")),
+            "stemAudioUrl", firstNonBlank(detail.get("stemAudioUrl"), detail.get("parentStemAudioUrl")),
+            "stemFileUrl", firstNonBlank(detail.get("stemFileUrl"), detail.get("parentStemFileUrl")),
+            "options", question == null ? detail.get("options") : question.get("options"),
             "optionImageUrls", question == null ? detail.get("optionImageUrls") : question.get("optionImageUrls"),
             "answer", detail.get("answer"),
             "answerText", detail.get("answerText"),
@@ -3793,6 +3993,7 @@ public class CourseApiController
             + normalizeQuestionText(question.get("stemAudioUrl")) + "|"
             + normalizeQuestionText(question.get("questionType")) + "|"
             + normalizeQuestionText(question.get("options")) + "|"
+            + normalizeQuestionText(question.get("subQuestions")) + "|"
             + normalizeQuestionText(question.get("optionImageUrls")) + "|"
             + normalizeQuestionText(question.get("answer")) + "|"
             + normalizeQuestionText(question.get("answerText"));
@@ -3848,7 +4049,7 @@ public class CourseApiController
     {
         for (String key : Arrays.asList(
             "questionId", "questionKey", "sourceWrongId", "originType", "courseId", "courseTitle", "subjectTitle",
-            "title", "type", "sourceType", "stem", "stemImageUrl", "stemAudioUrl", "stemFileUrl", "options", "optionImageUrls", "answer", "answerText",
+            "title", "type", "sourceType", "parentQuestionId", "parentStem", "stem", "stemImageUrl", "stemAudioUrl", "stemFileUrl", "options", "optionImageUrls", "answer", "answerText",
             "answerImageUrl", "answerFileUrl", "selected", "selectedText", "studentAnswerImageUrl", "analysis", "analysisImageUrl",
             "analysisFileUrl",
             "videoAnalysisUrl", "knowledge", "mastered", "lastRetryCorrect", "lastRetryAt"))
@@ -4179,10 +4380,15 @@ public class CourseApiController
             rows.add(map(
                 "questionNo", i + 1,
                 "total", total,
+                "parentQuestionId", detail.get("parentQuestionId"),
+                "parentStem", detail.get("parentStem"),
                 "stem", detail.get("stem"),
                 "stemImageUrl", detail.get("stemImageUrl"),
                 "stemAudioUrl", detail.get("stemAudioUrl"),
                 "stemFileUrl", detail.get("stemFileUrl"),
+                "parentStemImageUrl", detail.get("parentStemImageUrl"),
+                "parentStemAudioUrl", detail.get("parentStemAudioUrl"),
+                "parentStemFileUrl", detail.get("parentStemFileUrl"),
                 "optionImageUrls", detail.get("optionImageUrls"),
                 "questionType", type,
                 "myAnswer", myAnswer.length() == 0 ? "--" : myAnswer,
