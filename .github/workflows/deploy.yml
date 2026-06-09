@@ -176,39 +176,102 @@ jobs:
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
           fi
 
-          PACKAGE_SHA="$(sha256sum "$PACKAGE_PATH" | awk '{print $1}')"
-          PACKAGE_SIZE="$(stat -c%s "$PACKAGE_PATH")"
           du -h "$PACKAGE_PATH"
+          PATCH_ZIP="backend-class-patch.zip"
+          PATCH_MANIFEST="backend-class-patch.sha256"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import zipfile
 
-          echo "Uploading full backend package..."
-          retry 5 timeout 10m scp $SCP_OPTS "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME.upload"
+          class_root = Path("ruoyi-admin/target/classes")
+          patch_dirs = [
+              class_root / "com/ruoyi/web/controller/course",
+          ]
+          classes = sorted(
+              path
+              for source_dir in patch_dirs
+              for path in source_dir.rglob("*.class")
+          )
+          common_jars = sorted(Path("ruoyi-common/target").glob("ruoyi-common-*.jar"))
+          common_jars = [path for path in common_jars if not path.name.startswith("original-")]
+          if not classes:
+              raise SystemExit("Backend class patch files were not found")
+          if not common_jars:
+              raise SystemExit("ruoyi-common jar was not found")
 
-          echo "Verifying and installing backend package..."
-          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PACKAGE_SHA='$PACKAGE_SHA' PACKAGE_SIZE='$PACKAGE_SIZE' bash -s" <<'REMOTE'
+          manifest = []
+          with zipfile.ZipFile("backend-class-patch.zip", "w", zipfile.ZIP_DEFLATED) as patch:
+              for path in classes:
+                  data = path.read_bytes()
+                  archive_name = "BOOT-INF/classes/" + path.relative_to(class_root).as_posix()
+                  patch.writestr(archive_name, data)
+                  manifest.append(f"{hashlib.sha256(data).hexdigest()}  {archive_name}\n")
+
+              common_jar = common_jars[0]
+              data = common_jar.read_bytes()
+              archive_name = f"BOOT-INF/lib/{common_jar.name}"
+              patch.writestr(archive_name, data)
+              manifest.append(f"{hashlib.sha256(data).hexdigest()}  {archive_name}\n")
+
+          Path("backend-class-patch.sha256").write_text("".join(manifest), encoding="utf-8")
+          PY
+
+          du -h "$PATCH_ZIP"
+          echo "Uploading backend class patch..."
+          retry 5 timeout 2m scp $SCP_OPTS "$PATCH_ZIP" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$PATCH_ZIP"
+          retry 5 timeout 2m scp $SCP_OPTS "$PATCH_MANIFEST" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$PATCH_MANIFEST"
+
+          echo "Installing backend class patch..."
+          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PATCH_ZIP='$PATCH_ZIP' PATCH_MANIFEST='$PATCH_MANIFEST' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
           set -euo pipefail
-          PACKAGE_UPLOAD="$RELEASE_DIR/$APP_NAME.upload"
-          if [ ! -s "$PACKAGE_UPLOAD" ]; then
-            echo "uploaded backend package not found"
+          if [ ! -f "$APP_DIR/$APP_NAME" ]; then
+            echo "existing backend package not found"
             exit 1
           fi
 
-          UPLOADED_SHA="$(sha256sum "$PACKAGE_UPLOAD" | awk '{print $1}')"
-          UPLOADED_SIZE="$(stat -c%s "$PACKAGE_UPLOAD")"
-          if [ "$UPLOADED_SHA" != "$PACKAGE_SHA" ]; then
-            echo "uploaded backend package sha256 mismatch"
-            exit 1
-          fi
-          if [ "$UPLOADED_SIZE" != "$PACKAGE_SIZE" ]; then
-            echo "uploaded backend package size mismatch"
+          PATCH_ROOT="$RELEASE_DIR/class-patch"
+          rm -rf "$PATCH_ROOT"
+          mkdir -p "$PATCH_ROOT"
+          python3 - "$RELEASE_DIR/$PATCH_ZIP" "$PATCH_ROOT" <<'PY'
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(sys.argv[1]) as patch:
+              patch.extractall(sys.argv[2])
+          PY
+
+          JAR_TOOL=""
+          if [ -x "$JAVA_HOME/bin/jar" ]; then
+            JAR_TOOL="$JAVA_HOME/bin/jar"
+          elif command -v jar >/dev/null 2>&1; then
+            JAR_TOOL="$(command -v jar)"
+          else
+            echo "jar command not found"
             exit 1
           fi
 
-          if [ -f "$APP_DIR/$APP_NAME" ]; then
-            cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME.before-replace" || true
-          fi
-          mv "$PACKAGE_UPLOAD" "$APP_DIR/$APP_NAME.tmp"
-          chmod 0644 "$APP_DIR/$APP_NAME.tmp" || true
-          mv -f "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
+          cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME.before-patch"
+          cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME"
+          cd "$PATCH_ROOT"
+          "$JAR_TOOL" uf "$RELEASE_DIR/$APP_NAME" $(cut -d' ' -f3- "$RELEASE_DIR/$PATCH_MANIFEST")
+
+          python3 - "$RELEASE_DIR/$APP_NAME" "$RELEASE_DIR/$PATCH_MANIFEST" <<'PY'
+          import hashlib
+          import sys
+          import zipfile
+
+          jar_path, manifest_path = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(jar_path) as jar:
+              for line in open(manifest_path, encoding="utf-8"):
+                  expected, name = line.strip().split(None, 1)
+                  actual = hashlib.sha256(jar.read(name)).hexdigest()
+                  if actual != expected:
+                      raise SystemExit(f"patch verification failed for {name}")
+          PY
+
+          cp "$RELEASE_DIR/$APP_NAME" "$APP_DIR/$APP_NAME.tmp"
+          mv "$APP_DIR/$APP_NAME.tmp" "$APP_DIR/$APP_NAME"
           REMOTE
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
 
