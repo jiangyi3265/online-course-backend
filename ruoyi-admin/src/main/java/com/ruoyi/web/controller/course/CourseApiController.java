@@ -389,6 +389,7 @@ public class CourseApiController
             return AjaxResult.success(Collections.emptyList());
         }
         List<Map<String, Object>> list = new ArrayList<>();
+        Set<String> includedCourseIds = new LinkedHashSet<>();
         for (Map<String, Object> enrollment : enrollments)
         {
             if (!str(user.get("id")).equals(enrollment.get("userId")) || !isEnrollmentOpen(enrollment))
@@ -398,6 +399,7 @@ public class CourseApiController
             Map<String, Object> course = findCourse(str(enrollment.get("courseId")));
             if (course != null)
             {
+                includedCourseIds.add(str(course.get("id")));
                 list.add(map(
                     "id", course.get("id"),
                     "title", stripCourseYear(course.get("courseName")),
@@ -412,6 +414,34 @@ public class CourseApiController
                     "grade", enrollment.get("grade"),
                     "schoolName", enrollment.get("schoolName"),
                     "region", enrollment.get("region")
+                ));
+            }
+        }
+        for (Map<String, Object> order : orders)
+        {
+            String courseId = str(order.get("courseId"));
+            if (!str(user.get("id")).equals(str(order.get("userId"))) || includedCourseIds.contains(courseId) || !isOrderOpen(order))
+            {
+                continue;
+            }
+            Map<String, Object> course = findCourse(courseId);
+            if (course != null)
+            {
+                includedCourseIds.add(courseId);
+                list.add(map(
+                    "id", course.get("id"),
+                    "title", stripCourseYear(course.get("courseName")),
+                    "courseName", stripCourseYear(course.get("courseName")),
+                    "sub", stripCourseYear(course.get("introduction")),
+                    "expiry", order.get("expiresAt"),
+                    "cover", course.get("cover"),
+                    "subject", course.get("subject"),
+                    "kind", course.get("kind"),
+                    "studentName", order.get("studentName"),
+                    "recentExamScore", order.get("recentExamScore"),
+                    "grade", order.get("grade"),
+                    "schoolName", order.get("schoolName"),
+                    "region", order.get("region")
                 ));
             }
         }
@@ -1369,8 +1399,12 @@ public class CourseApiController
         {
             return AjaxResult.error("请选择正式课程");
         }
-        String expiry = expiryForCard(card);
         Map<String, Object> user = currentUser(request);
+        if (hasOpenEnrollmentForCourse(user, courseId))
+        {
+            return AjaxResult.error("该用户该课程已激活且未到期/未关闭，不能重复激活");
+        }
+        String expiry = expiryForCard(card);
         Map<String, Object> order = createOrderRecord(courseId, user, "激活码开通", code, expiry, str(card.get("cardType")));
         order.put("studentName", studentName);
         order.put("gender", gender);
@@ -1463,6 +1497,10 @@ public class CourseApiController
             course.put("id", "course-" + System.currentTimeMillis());
         }
         ensureCourseDefaults(course);
+        if (hasDuplicateCourseName(course, str(course.get("id"))))
+        {
+            return AjaxResult.error("课程名称不能和已有课程完全相同");
+        }
         courses.add(course);
         logOperation("课程管理", "后台管理员", course.get("courseName"), "新增课程", "已完成");
         persistData();
@@ -1478,9 +1516,16 @@ public class CourseApiController
         {
             return AjaxResult.error("课程不存在");
         }
-        course.putAll(body);
-        course.put("id", id);
-        ensureCourseDefaults(course);
+        Map<String, Object> next = new LinkedHashMap<>(course);
+        next.putAll(body);
+        next.put("id", id);
+        ensureCourseDefaults(next);
+        if (hasDuplicateCourseName(next, id))
+        {
+            return AjaxResult.error("课程名称不能和已有课程完全相同");
+        }
+        course.clear();
+        course.putAll(next);
         logOperation("课程管理", "后台管理员", course.get("courseName"), "编辑课程", "已完成");
         persistData();
         return AjaxResult.success(course);
@@ -1530,6 +1575,10 @@ public class CourseApiController
             doc.put("uploadTime", now());
         }
         ensureDocDefaults(doc);
+        if (hasDuplicateDocTitle(doc, str(doc.get("id"))))
+        {
+            return AjaxResult.error("资料名称不能和已有资料完全相同");
+        }
         docs.add(doc);
         logOperation("资料管理", "后台管理员", doc.get("title"), "新增资料", "已完成");
         persistData();
@@ -1549,9 +1598,16 @@ public class CourseApiController
         {
             return AjaxResult.error("资料只能绑定正式课程");
         }
-        doc.putAll(body);
-        doc.put("id", id);
-        ensureDocDefaults(doc);
+        Map<String, Object> next = new LinkedHashMap<>(doc);
+        next.putAll(body);
+        next.put("id", id);
+        ensureDocDefaults(next);
+        if (hasDuplicateDocTitle(next, id))
+        {
+            return AjaxResult.error("资料名称不能和已有资料完全相同");
+        }
+        doc.clear();
+        doc.putAll(next);
         logOperation("资料管理", "后台管理员", doc.get("title"), "编辑资料", "已完成");
         persistData();
         return AjaxResult.success(doc);
@@ -1895,6 +1951,10 @@ public class CourseApiController
         {
             return AjaxResult.error("请选择正式课程");
         }
+        if (hasOpenEnrollmentForCourse(user, courseId))
+        {
+            return AjaxResult.error("该用户该课程已激活且未到期/未关闭，不能重复激活");
+        }
         String expiry = expiryForCard(card);
         Map<String, Object> order = createOrderRecord(courseId, user, "后台激活码开通", code, expiry, str(card.get("cardType")));
         order.put("studentName", valueOrDefault(body.get("studentName"), user.get("name")));
@@ -2002,6 +2062,10 @@ public class CourseApiController
         if (!isFullCourse(courseId))
         {
             return AjaxResult.error("请选择有效正式课程");
+        }
+        if (hasOpenEnrollmentForCourse(user, courseId))
+        {
+            return AjaxResult.error("该用户该课程已激活且未到期/未关闭，不能重复开通");
         }
         String expiry = expiryByType(str(body.get("cardType")).length() == 0 ? "year" : str(body.get("cardType")));
         Map<String, Object> order = createOrderRecord(courseId, user, "后台开课", str(body.get("cardCode")), expiry, str(body.get("cardType")));
@@ -6260,8 +6324,40 @@ public class CourseApiController
 
     private static boolean hasActiveEnrollment(Map<String, Object> user, String courseId)
     {
-        Map<String, Object> enrollment = findEnrollment(user, courseId);
-        return enrollment != null && isEnrollmentOpen(enrollment);
+        return hasOpenEnrollmentForCourse(user, courseId);
+    }
+
+    private static boolean hasOpenEnrollmentForCourse(Map<String, Object> user, String courseId)
+    {
+        return user != null && hasOpenEnrollmentForCourse(str(user.get("id")), courseId);
+    }
+
+    private static boolean hasOpenEnrollmentForCourse(String userId, String courseId)
+    {
+        String targetCourseId = str(courseId).trim();
+        if (userId.length() == 0 || targetCourseId.length() == 0)
+        {
+            return false;
+        }
+        for (Map<String, Object> enrollment : enrollments)
+        {
+            if (userId.equals(str(enrollment.get("userId")))
+                && targetCourseId.equals(str(enrollment.get("courseId")))
+                && isEnrollmentOpen(enrollment))
+            {
+                return true;
+            }
+        }
+        for (Map<String, Object> order : orders)
+        {
+            if (userId.equals(str(order.get("userId")))
+                && targetCourseId.equals(str(order.get("courseId")))
+                && isOrderOpen(order))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isEnrollmentOpen(Map<String, Object> enrollment)
@@ -6271,7 +6367,17 @@ public class CourseApiController
             return false;
         }
         Map<String, Object> card = findActivationCode(str(enrollment.get("cardCode")));
-        return card == null || !activationCardLocked(card);
+        return card == null || (!activationCardLocked(card) && !activationAuthorizationClosed(card));
+    }
+
+    private static boolean isOrderOpen(Map<String, Object> order)
+    {
+        if (order == null || !"activated".equals(order.get("status")) || isExpired(str(order.get("expiresAt"))))
+        {
+            return false;
+        }
+        Map<String, Object> card = findActivationCode(str(order.get("cardCode")));
+        return card == null || (!activationCardLocked(card) && !activationAuthorizationClosed(card));
     }
 
     private static void refreshExpiredEnrollments()
@@ -6787,6 +6893,54 @@ public class CourseApiController
     private static Map<String, Object> findCourse(String id)
     {
         return findById(courses, id);
+    }
+
+    private static boolean hasDuplicateCourseName(Map<String, Object> targetCourse, String excludedId)
+    {
+        String targetName = exactManagedName(valueOrDefault(targetCourse.get("courseName"), targetCourse.get("title")));
+        if (targetName.length() == 0)
+        {
+            return false;
+        }
+        for (Map<String, Object> course : courses)
+        {
+            if (str(course.get("id")).equals(str(excludedId)))
+            {
+                continue;
+            }
+            String existingName = exactManagedName(valueOrDefault(course.get("courseName"), course.get("title")));
+            if (targetName.equals(existingName))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasDuplicateDocTitle(Map<String, Object> targetDoc, String excludedId)
+    {
+        String targetTitle = exactManagedName(targetDoc.get("title"));
+        if (targetTitle.length() == 0)
+        {
+            return false;
+        }
+        for (Map<String, Object> doc : docs)
+        {
+            if (str(doc.get("id")).equals(str(excludedId)))
+            {
+                continue;
+            }
+            if (targetTitle.equals(exactManagedName(doc.get("title"))))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String exactManagedName(Object value)
+    {
+        return str(value).trim();
     }
 
     private static boolean isFullCourse(String id)
