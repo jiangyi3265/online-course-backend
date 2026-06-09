@@ -223,7 +223,7 @@ jobs:
           retry 5 timeout 2m scp $SCP_OPTS "$PATCH_MANIFEST" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$PATCH_MANIFEST"
 
           echo "Installing backend class patch..."
-          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PATCH_ZIP='$PATCH_ZIP' PATCH_MANIFEST='$PATCH_MANIFEST' JAVA_HOME='$SERVER_JAVA_HOME' bash -s" <<'REMOTE'
+          timeout 5m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "APP_DIR='$APP_DIR' APP_NAME='$APP_NAME' RELEASE_DIR='$RELEASE_DIR' PATCH_ZIP='$PATCH_ZIP' PATCH_MANIFEST='$PATCH_MANIFEST' bash -s" <<'REMOTE'
           set -euo pipefail
           if [ ! -f "$APP_DIR/$APP_NAME" ]; then
             echo "existing backend package not found"
@@ -241,20 +241,62 @@ jobs:
               patch.extractall(sys.argv[2])
           PY
 
-          JAR_TOOL=""
-          if [ -x "$JAVA_HOME/bin/jar" ]; then
-            JAR_TOOL="$JAVA_HOME/bin/jar"
-          elif command -v jar >/dev/null 2>&1; then
-            JAR_TOOL="$(command -v jar)"
-          else
-            echo "jar command not found"
-            exit 1
-          fi
-
           cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME.before-patch"
-          cp "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME"
-          cd "$PATCH_ROOT"
-          "$JAR_TOOL" uf "$RELEASE_DIR/$APP_NAME" $(cut -d' ' -f3- "$RELEASE_DIR/$PATCH_MANIFEST")
+          python3 - "$APP_DIR/$APP_NAME" "$RELEASE_DIR/$APP_NAME" "$PATCH_ROOT" "$RELEASE_DIR/$PATCH_MANIFEST" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          source_path, target_path, patch_root, manifest_path = sys.argv[1:]
+          patch_root = pathlib.Path(patch_root)
+          patch_names = []
+          patch_data = {}
+          with open(manifest_path, encoding="utf-8") as manifest:
+              for line in manifest:
+                  if not line.strip():
+                      continue
+                  _, name = line.strip().split(None, 1)
+                  patch_names.append(name)
+                  patch_data[name] = (patch_root / name).read_bytes()
+
+          def copy_info(info, name):
+              new_info = zipfile.ZipInfo(name, info.date_time)
+              new_info.comment = info.comment
+              new_info.extra = info.extra
+              new_info.internal_attr = info.internal_attr
+              new_info.external_attr = info.external_attr
+              new_info.create_system = info.create_system
+              new_info.compress_type = (
+                  zipfile.ZIP_STORED
+                  if name.startswith("BOOT-INF/lib/") and name.endswith(".jar")
+                  else info.compress_type
+              )
+              return new_info
+
+          written = set()
+          with zipfile.ZipFile(source_path, "r") as source, zipfile.ZipFile(target_path, "w", allowZip64=True) as target:
+              for info in source.infolist():
+                  name = info.filename
+                  data = patch_data.pop(name, None)
+                  if data is None:
+                      data = source.read(name)
+                  target.writestr(copy_info(info, name), data)
+                  written.add(name)
+
+              for name, data in patch_data.items():
+                  info = zipfile.ZipInfo(name)
+                  info.compress_type = (
+                      zipfile.ZIP_STORED
+                      if name.startswith("BOOT-INF/lib/") and name.endswith(".jar")
+                      else zipfile.ZIP_DEFLATED
+                  )
+                  target.writestr(info, data)
+                  written.add(name)
+
+          missing = [name for name in patch_names if name not in written]
+          if missing:
+              raise SystemExit("patch entries missing after rewrite: " + ", ".join(missing))
+          PY
 
           python3 - "$RELEASE_DIR/$APP_NAME" "$RELEASE_DIR/$PATCH_MANIFEST" <<'PY'
           import hashlib
