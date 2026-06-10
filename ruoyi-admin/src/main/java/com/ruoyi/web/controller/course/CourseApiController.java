@@ -914,6 +914,8 @@ public class CourseApiController
         Map<String, Object> user = currentUser(request);
         List<Map<String, Object>> courseItems = new ArrayList<>();
         List<Map<String, Object>> questionItems = new ArrayList<>();
+        List<Map<String, Object>> docItems = new ArrayList<>();
+        List<Map<String, Object>> paperItems = new ArrayList<>();
         for (Map<String, Object> favorite : favorites)
         {
             if (!sameUser(favorite, user))
@@ -948,8 +950,26 @@ public class CourseApiController
                     questionItems.add(item);
                 }
             }
+            else if (isDocumentFavoriteType(str(favorite.get("type"))))
+            {
+                Map<String, Object> item = favoriteDocItem(favorite);
+                if (item != null)
+                {
+                    if (isPaperDoc(item))
+                    {
+                        paperItems.add(item);
+                    }
+                    else
+                    {
+                        docItems.add(item);
+                    }
+                }
+            }
         }
-        return AjaxResult.success(map("courses", courseItems, "questions", questionItems));
+        List<Map<String, Object>> documentItems = new ArrayList<>();
+        documentItems.addAll(docItems);
+        documentItems.addAll(paperItems);
+        return AjaxResult.success(map("courses", courseItems, "questions", questionItems, "docs", docItems, "papers", paperItems, "documents", documentItems));
     }
 
     @PostMapping("/app/favorites/toggle")
@@ -988,6 +1008,10 @@ public class CourseApiController
             "targetId", targetId,
             "title", body.get("title"),
             "courseId", body.get("courseId"),
+            "category", body.get("category"),
+            "fileUrl", body.get("fileUrl"),
+            "fileType", body.get("fileType"),
+            "size", body.get("size"),
             "createdAt", now()
         );
         favorites.add(favorite);
@@ -1062,6 +1086,46 @@ public class CourseApiController
         }
         persistData();
         return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
+    }
+
+    private static boolean isDocumentFavoriteType(String type)
+    {
+        return "doc".equals(type) || "document".equals(type) || "paper".equals(type);
+    }
+
+    private static Map<String, Object> favoriteDocItem(Map<String, Object> favorite)
+    {
+        String targetId = str(favorite.get("targetId"));
+        Map<String, Object> doc = findById(docs, targetId);
+        Map<String, Object> item = new LinkedHashMap<>();
+        if (doc != null)
+        {
+            item.putAll(doc);
+        }
+        else
+        {
+            item.put("id", targetId);
+            item.put("title", favorite.get("title"));
+            item.put("courseId", favorite.get("courseId"));
+            item.put("category", favorite.get("category"));
+            item.put("fileUrl", favorite.get("fileUrl"));
+            item.put("fileType", favorite.get("fileType"));
+            item.put("size", favorite.get("size"));
+        }
+        if (str(item.get("title")).length() == 0)
+        {
+            return null;
+        }
+        item.put("favoriteId", favorite.get("id"));
+        item.put("targetId", targetId);
+        item.put("createdAt", favorite.get("createdAt"));
+        item.put("courseTitle", resolveCourseTitle(item.get("courseId")));
+        return item;
+    }
+
+    private static boolean isPaperDoc(Map<String, Object> doc)
+    {
+        return "paper".equals(doc.get("category")) || str(doc.get("title")).contains("试卷") || str(doc.get("title")).contains("测试卷");
     }
 
     @GetMapping("/app/my/students")
@@ -1497,6 +1561,7 @@ public class CourseApiController
             course.put("id", "course-" + System.currentTimeMillis());
         }
         ensureCourseDefaults(course);
+        course.put("updatedAt", now());
         if (hasDuplicateCourseName(course, str(course.get("id"))))
         {
             return AjaxResult.error("课程名称不能和已有课程完全相同");
@@ -1520,6 +1585,7 @@ public class CourseApiController
         next.putAll(body);
         next.put("id", id);
         ensureCourseDefaults(next);
+        next.put("updatedAt", now());
         if (hasDuplicateCourseName(next, id))
         {
             return AjaxResult.error("课程名称不能和已有课程完全相同");
@@ -3041,9 +3107,27 @@ public class CourseApiController
             List<Map<String, Object>> children = mapList(item.get("children"));
             if (!children.isEmpty())
             {
-                total += sumDurationInItems(children);
+                total += sumDurationInItems(children, item);
             }
-            else if (intValue(item.get("type")) != 2)
+            else if (intValue(item.get("type")) != 2 && hasVideoContent(item, item))
+            {
+                total += durationSeconds(item);
+            }
+        }
+        return total;
+    }
+
+    private static int sumDurationInItems(List<Map<String, Object>> items, Map<String, Object> parent)
+    {
+        int total = 0;
+        for (Map<String, Object> item : items)
+        {
+            List<Map<String, Object>> children = mapList(item.get("children"));
+            if (!children.isEmpty())
+            {
+                total += sumDurationInItems(children, item);
+            }
+            else if (intValue(item.get("type")) != 2 && hasVideoContent(item, parent))
             {
                 total += durationSeconds(item);
             }
@@ -3077,18 +3161,23 @@ public class CourseApiController
             {
                 for (Map<String, Object> child : children)
                 {
-                    if (intValue(child.get("type")) != 2)
+                    if (intValue(child.get("type")) != 2 && hasVideoContent(child, item))
                     {
                         total++;
                     }
                 }
             }
-            else if (intValue(item.get("type")) != 2)
+            else if (intValue(item.get("type")) != 2 && hasVideoContent(item, item))
             {
                 total++;
             }
         }
         return total;
+    }
+
+    private static boolean hasVideoContent(Map<String, Object> item, Map<String, Object> parent)
+    {
+        return firstNonBlank(item.get("videoUrl"), parent == null ? "" : parent.get("videoUrl"), item.get("fileUrl"), item.get("url")).length() > 0;
     }
 
     private static Map<String, Object> courseProgressStats(Map<String, Object> user, String courseId, int totalLessons)
