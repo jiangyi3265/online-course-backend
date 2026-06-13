@@ -3072,6 +3072,10 @@ public class CourseApiController
         int total = 0;
         for (Map<String, Object> chapter : chapters)
         {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
             total += countLessonItems(mapList(chapter.get("items")));
             total += countLessonItems(mapList(chapter.get("children")));
         }
@@ -3093,6 +3097,10 @@ public class CourseApiController
         int total = 0;
         for (Map<String, Object> chapter : chapters)
         {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
             total += sumDurationInItems(mapList(chapter.get("items")));
             total += sumDurationInItems(mapList(chapter.get("children")));
         }
@@ -3104,6 +3112,10 @@ public class CourseApiController
         int total = 0;
         for (Map<String, Object> item : items)
         {
+            if (isHidden(item))
+            {
+                continue;
+            }
             List<Map<String, Object>> children = mapList(item.get("children"));
             if (!children.isEmpty())
             {
@@ -3122,6 +3134,10 @@ public class CourseApiController
         int total = 0;
         for (Map<String, Object> item : items)
         {
+            if (isHidden(item))
+            {
+                continue;
+            }
             List<Map<String, Object>> children = mapList(item.get("children"));
             if (!children.isEmpty())
             {
@@ -3156,12 +3172,16 @@ public class CourseApiController
         int total = 0;
         for (Map<String, Object> item : items)
         {
+            if (isHidden(item))
+            {
+                continue;
+            }
             List<Map<String, Object>> children = mapList(item.get("children"));
             if (!children.isEmpty())
             {
                 for (Map<String, Object> child : children)
                 {
-                    if (intValue(child.get("type")) != 2 && hasVideoContent(child, item))
+                    if (!isHidden(child) && intValue(child.get("type")) != 2 && hasVideoContent(child, item))
                     {
                         total++;
                     }
@@ -3178,6 +3198,11 @@ public class CourseApiController
     private static boolean hasVideoContent(Map<String, Object> item, Map<String, Object> parent)
     {
         return firstNonBlank(item.get("videoUrl"), parent == null ? "" : parent.get("videoUrl"), item.get("fileUrl"), item.get("url")).length() > 0;
+    }
+
+    private static boolean isHidden(Map<String, Object> item)
+    {
+        return item != null && Boolean.FALSE.equals(item.get("visible"));
     }
 
     private static Map<String, Object> courseProgressStats(Map<String, Object> user, String courseId, int totalLessons)
@@ -5910,25 +5935,68 @@ public class CourseApiController
     {
         for (Map<String, Object> chapter : mapList(course.get("chapters")))
         {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
             if (lessonId.equals(str(chapter.get("title"))))
             {
-                return map("course", course, "courseId", course.get("id"), "chapterTitle", chapter.get("title"));
+                return map(
+                    "course", course,
+                    "courseId", course.get("id"),
+                    "chapterTitle", chapter.get("title"),
+                    "videoUrl", lessonVideoUrl(chapter)
+                );
             }
         }
         for (Map<String, Object> version : mapList(course.get("versions")))
         {
             for (Map<String, Object> chapter : mapList(version.get("chapters")))
             {
+                if (isHidden(chapter))
+                {
+                    continue;
+                }
                 for (Map<String, Object> lesson : mapList(chapter.get("items")))
                 {
+                    if (isHidden(lesson))
+                    {
+                        continue;
+                    }
                     if (lessonId.equals(str(lesson.get("title"))))
                     {
-                        return map("course", course, "courseId", course.get("id"), "chapterTitle", chapter.get("title"));
+                        return map(
+                            "course", course,
+                            "courseId", course.get("id"),
+                            "chapterTitle", chapter.get("title"),
+                            "videoUrl", lessonVideoUrl(lesson)
+                        );
                     }
                 }
             }
         }
         return null;
+    }
+
+    private static String lessonVideoUrl(Map<String, Object> lesson)
+    {
+        String direct = firstNonBlank(lesson.get("videoUrl"), lesson.get("fileUrl"), lesson.get("url")).trim();
+        if (direct.length() > 0)
+        {
+            return direct;
+        }
+        for (Map<String, Object> child : mapList(lesson.get("children")))
+        {
+            if (intValue(child.get("type")) != 2 && !isHidden(child))
+            {
+                String childVideo = firstNonBlank(child.get("videoUrl"), child.get("fileUrl"), child.get("url")).trim();
+                if (childVideo.length() > 0)
+                {
+                    return childVideo;
+                }
+            }
+        }
+        return "";
     }
 
     private static Map<String, Object> createOrderRecord(String courseId, Map<String, Object> user, String source, String cardCode)
