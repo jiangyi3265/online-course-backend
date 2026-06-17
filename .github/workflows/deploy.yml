@@ -182,7 +182,10 @@ jobs:
           DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
           DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
           DB_PASSWORD_ARGS=()
-          DB_PASSWORD_ARGS=(--spring.datasource.druid.master.username="$DB_USERNAME")
+          DB_PASSWORD_ARGS=(
+            --spring.datasource.druid.master.url="jdbc:mysql://127.0.0.1:3306/ha?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
+            --spring.datasource.druid.master.username="$DB_USERNAME"
+          )
           if [ -n "$DB_PASSWORD" ]; then
             export SPRING_DATASOURCE_DRUID_MASTER_USERNAME="$DB_USERNAME"
             export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$DB_PASSWORD"
@@ -496,22 +499,57 @@ jobs:
           PY
           }
 
+          mysql_tcp_ready() {
+            mysqladmin -h127.0.0.1 -P3306 ping --silent >/dev/null 2>&1
+          }
+
+          start_mysql_service() {
+            for svc in mysqld mysql mariadb; do
+              systemctl start "$svc" >/dev/null 2>&1 || true
+              service "$svc" start >/dev/null 2>&1 || true
+              [ -x "/etc/init.d/$svc" ] && "/etc/init.d/$svc" start >/dev/null 2>&1 || true
+            done
+            [ -x /www/server/mysql/bin/mysql.server ] && /www/server/mysql/bin/mysql.server start >/dev/null 2>&1 || true
+          }
+
+          stop_mysql_service() {
+            for svc in mysqld mysql mariadb; do
+              systemctl stop "$svc" >/dev/null 2>&1 || true
+              service "$svc" stop >/dev/null 2>&1 || true
+              [ -x "/etc/init.d/$svc" ] && "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
+            done
+            [ -x /www/server/mysql/bin/mysql.server ] && /www/server/mysql/bin/mysql.server stop >/dev/null 2>&1 || true
+          }
+
+          wait_for_mysql_tcp() {
+            for i in $(seq 1 60); do
+              if mysql_tcp_ready; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          start_mysql_service
+          wait_for_mysql_tcp || true
+
+          APP_DIR="/www/wwwroot/wangkejava"
+          APP_DB_ENV="$APP_DIR/.db.env"
+          APP_DB_USER="wangke_app"
+
+          if [ -f "$APP_DB_ENV" ]; then
+            set -a
+            . "$APP_DB_ENV"
+            set +a
+            if [ -n "${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-}" ] && MYSQL_PWD="$SPRING_DATASOURCE_DRUID_MASTER_PASSWORD" mysql -h127.0.0.1 -P3306 -u"${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-$APP_DB_USER}" -N -e "select 1" ha >/dev/null 2>&1; then
+              echo "existing app database credentials are valid"
+              exit 0
+            fi
+          fi
+
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
           if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
-            APP_DIR="/www/wwwroot/wangkejava"
-            APP_DB_ENV="$APP_DIR/.db.env"
-            APP_DB_USER="wangke_app"
-
-            if [ -f "$APP_DB_ENV" ]; then
-              set -a
-              . "$APP_DB_ENV"
-              set +a
-              if [ -n "${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-}" ] && MYSQL_PWD="$SPRING_DATASOURCE_DRUID_MASTER_PASSWORD" mysql -u"${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-$APP_DB_USER}" -N -e "select 1" ha >/dev/null 2>&1; then
-                echo "existing app database credentials are valid"
-                exit 0
-              fi
-            fi
-
             echo "mysql root password not detected, repairing app database credentials"
             mkdir -p "$APP_DIR"
             APP_DB_PASSWORD="$(python3 - <<'PY'
@@ -538,7 +576,7 @@ jobs:
               exit 0
             fi
 
-            systemctl stop "$MYSQL_SERVICE" >/dev/null 2>&1 || true
+            stop_mysql_service
             sleep 5
             nohup "$MYSQLD_SAFE" --skip-grant-tables --skip-networking >/tmp/wangke-mysql-repair.log 2>&1 &
             for i in $(seq 1 45); do
@@ -551,10 +589,11 @@ jobs:
               echo "mysql repair mode did not start"
               tail -n 80 /tmp/wangke-mysql-repair.log || true
               mysqladmin -uroot shutdown >/dev/null 2>&1 || true
-              systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 || true
+              start_mysql_service
               exit 0
             fi
 
+            DB_EXISTS="$(mysql -uroot -N -e "show databases like 'ha'" || true)"
             mysql -uroot <<SQL
           FLUSH PRIVILEGES;
           CREATE DATABASE IF NOT EXISTS ha DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
@@ -564,16 +603,21 @@ jobs:
           FLUSH PRIVILEGES;
           SQL
 
+            if [ "$DB_EXISTS" != "ha" ] && [ -f "$RELEASE_DIR/ry_20250522.sql" ]; then
+              mysql -uroot ha < "$RELEASE_DIR/ry_20250522.sql"
+            fi
+
             mysqladmin -uroot shutdown >/dev/null 2>&1 || true
             sleep 5
-            systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 || true
-            for i in $(seq 1 45); do
-              if MYSQL_PWD="$APP_DB_PASSWORD" mysql -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
+            start_mysql_service
+            wait_for_mysql_tcp || true
+            for i in $(seq 1 60); do
+              if MYSQL_PWD="$APP_DB_PASSWORD" mysql -h127.0.0.1 -P3306 -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
                 break
               fi
               sleep 2
             done
-            if MYSQL_PWD="$APP_DB_PASSWORD" mysql -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
+            if MYSQL_PWD="$APP_DB_PASSWORD" mysql -h127.0.0.1 -P3306 -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
               cat > "$APP_DB_ENV" <<EOF
           SPRING_DATASOURCE_DRUID_MASTER_USERNAME=$APP_DB_USER
           SPRING_DATASOURCE_DRUID_MASTER_PASSWORD=$APP_DB_PASSWORD
@@ -584,14 +628,16 @@ jobs:
             fi
 
             echo "app database credential repair failed"
+            systemctl status mysqld mysql mariadb --no-pager || true
+            tail -n 80 /www/server/mysql/data/*.err 2>/dev/null || true
             exit 0
           fi
 
-          DB_EXISTS="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "show databases like 'ha'" || true)"
+          DB_EXISTS="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -h127.0.0.1 -P3306 -uroot -N -e "show databases like 'ha'" || true)"
           if [ "$DB_EXISTS" != "ha" ]; then
             test -f "$RELEASE_DIR/ry_20250522.sql"
-            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "create database ha default character set utf8mb4 collate utf8mb4_general_ci"
-            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot ha < "$RELEASE_DIR/ry_20250522.sql"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -h127.0.0.1 -P3306 -uroot -e "create database ha default character set utf8mb4 collate utf8mb4_general_ci"
+            MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -h127.0.0.1 -P3306 -uroot ha < "$RELEASE_DIR/ry_20250522.sql"
           fi
           REMOTE
 
@@ -723,7 +769,10 @@ jobs:
           DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
           DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
           DB_PASSWORD_ARGS=()
-          DB_PASSWORD_ARGS=(--spring.datasource.druid.master.username="$DB_USERNAME")
+          DB_PASSWORD_ARGS=(
+            --spring.datasource.druid.master.url="jdbc:mysql://127.0.0.1:3306/ha?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
+            --spring.datasource.druid.master.username="$DB_USERNAME"
+          )
           if [ -n "$DB_PASSWORD" ]; then
             export SPRING_DATASOURCE_DRUID_MASTER_USERNAME="$DB_USERNAME"
             export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$DB_PASSWORD"
@@ -795,6 +844,34 @@ jobs:
 
           if pgrep -f "$APP_DIR/$APP_NAME" >/dev/null 2>&1 || pgrep -f "$APP_DIR/$LEGACY_APP_NAME" >/dev/null 2>&1; then
             echo "old java process is still running"
+            exit 1
+          fi
+
+          mysql_tcp_ready() {
+            mysqladmin -h127.0.0.1 -P3306 ping --silent >/dev/null 2>&1
+          }
+
+          start_mysql_service() {
+            for svc in mysqld mysql mariadb; do
+              systemctl start "$svc" >/dev/null 2>&1 || true
+              service "$svc" start >/dev/null 2>&1 || true
+              [ -x "/etc/init.d/$svc" ] && "/etc/init.d/$svc" start >/dev/null 2>&1 || true
+            done
+            [ -x /www/server/mysql/bin/mysql.server ] && /www/server/mysql/bin/mysql.server start >/dev/null 2>&1 || true
+          }
+
+          start_mysql_service
+          for i in $(seq 1 60); do
+            if mysql_tcp_ready; then
+              break
+            fi
+            sleep 2
+          done
+
+          if ! mysql_tcp_ready; then
+            echo "mysql did not start listening on 127.0.0.1:3306"
+            systemctl status mysqld mysql mariadb --no-pager || true
+            tail -n 80 /www/server/mysql/data/*.err 2>/dev/null || true
             exit 1
           fi
 
