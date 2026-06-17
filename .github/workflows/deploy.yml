@@ -173,8 +173,13 @@ jobs:
           }
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          DB_PASSWORD_ARGS=()
           if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
             export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+            DB_PASSWORD_ARGS=(--spring.datasource.druid.master.password="$MYSQL_ROOT_PASSWORD")
+            echo "mysql root password detected for backend recovery"
+          else
+            echo "mysql root password not detected for backend recovery"
           fi
 
           cd "$APP_DIR"
@@ -186,6 +191,7 @@ jobs:
             -jar "$APP_DIR/$APP_NAME" \
             --ruoyi.profile="$APP_DIR/uploadPath" \
             --server.port="$APP_PORT" \
+            "${DB_PASSWORD_ARGS[@]}" \
             > "$LOG_FILE" 2>&1 &
 
           for i in $(seq 1 45); do
@@ -613,8 +619,13 @@ jobs:
           }
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          DB_PASSWORD_ARGS=()
           if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
             export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
+            DB_PASSWORD_ARGS=(--spring.datasource.druid.master.password="$MYSQL_ROOT_PASSWORD")
+            echo "mysql root password detected for backend startup"
+          else
+            echo "mysql root password not detected for backend startup"
           fi
 
           cd "$APP_DIR"
@@ -626,6 +637,7 @@ jobs:
             -jar "$APP_DIR/$APP_NAME" \
             --ruoyi.profile="$APP_DIR/uploadPath" \
             --server.port="$APP_PORT" \
+            "${DB_PASSWORD_ARGS[@]}" \
             >> "$LOG_FILE" 2>&1
           RUNNER
           chmod +x "$APP_DIR/run-$SERVICE_NAME.sh"
