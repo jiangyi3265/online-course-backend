@@ -1853,6 +1853,9 @@ public class CourseApiController
             ownerUserId
         );
         card.put("remark", str(body.get("remark")));
+        int dailyLimit = "month".equals(normalizeCardType(body.get("cardType"))) ? normalizeDailyLimit(body.get("dailyLimitMinutes")) : 0;
+        card.put("dailyLimitMinutes", dailyLimit);
+        card.put("dailyLimitText", dailyLimitText(dailyLimit));
         activationCodes.add(card);
         logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "新增激活码：" + code, "已完成");
         persistData();
@@ -1925,6 +1928,7 @@ public class CourseApiController
             }
             putIfPresent(card, body, "courseId");
             putIfPresent(card, body, "cardType");
+            putIfPresent(card, body, "dailyLimitMinutes");
             putIfPresent(card, body, "remark");
         }
         enrichActivationCard(card);
@@ -5325,6 +5329,12 @@ public class CourseApiController
         putIfPresent(card, card, "courseId");
         putIfPresent(card, card, "ownerUserId");
         putIfPresent(card, card, "cardType");
+        // 根据当前类型重新生成展示文案（编辑类型后同步更新）
+        card.put("cardTypeText", cardTypeText(card.get("cardType")));
+        card.put("durationText", cardDurationText(card.get("cardType")));
+        int dailyLimit = "month".equals(normalizeCardType(card.get("cardType"))) ? normalizeDailyLimit(card.get("dailyLimitMinutes")) : 0;
+        card.put("dailyLimitMinutes", dailyLimit);
+        card.put("dailyLimitText", dailyLimitText(dailyLimit));
         boolean assigned = str(card.get("ownerUserId")).length() > 0;
         card.put("assigned", assigned);
         card.put("authorizationClosed", activationAuthorizationClosed(card));
@@ -6080,6 +6090,7 @@ public class CourseApiController
             "cardType", normalizeCardType(cardType),
             "cardTypeText", cardTypeText(cardType),
             "durationText", cardDurationText(cardType),
+            "dailyLimitMinutes", 0,
             "ownerUserId", ownerUserId,
             "ownerName", owner == null ? "" : firstNonBlank(owner.get("organizationName"), owner.get("name"), owner.get("id")),
             "status", "available",
@@ -6099,6 +6110,10 @@ public class CourseApiController
         {
             return "days7";
         }
+        if ("month".equalsIgnoreCase(type) || "monthly".equalsIgnoreCase(type) || "30d".equalsIgnoreCase(type) || "days30".equalsIgnoreCase(type))
+        {
+            return "month";
+        }
         return "year";
     }
 
@@ -6112,6 +6127,10 @@ public class CourseApiController
         if ("days7".equals(type))
         {
             return "7天临时体验卡";
+        }
+        if ("month".equals(type))
+        {
+            return "月卡";
         }
         return "一年期课程卡";
     }
@@ -6127,7 +6146,44 @@ public class CourseApiController
         {
             return "7天";
         }
+        if ("month".equals(type))
+        {
+            return "1个月";
+        }
         return "一年";
+    }
+
+    // 每日观看时长上限（分钟），以半小时为单位取整；0 表示不限
+    private static int normalizeDailyLimit(Object value)
+    {
+        int minutes = intValue(value);
+        if (minutes <= 0)
+        {
+            return 0;
+        }
+        minutes = Math.round(minutes / 30f) * 30;
+        if (minutes < 30)
+        {
+            minutes = 30;
+        }
+        if (minutes > 24 * 60)
+        {
+            minutes = 24 * 60;
+        }
+        return minutes;
+    }
+
+    private static String dailyLimitText(int minutes)
+    {
+        if (minutes <= 0)
+        {
+            return "不限时长";
+        }
+        if (minutes % 60 == 0)
+        {
+            return "每日" + (minutes / 60) + "小时";
+        }
+        return "每日" + (minutes / 60f) + "小时";
     }
 
     private static String expiryForCard(Map<String, Object> card)
@@ -6146,6 +6202,10 @@ public class CourseApiController
         if ("days7".equals(type))
         {
             return now.plusDays(7).toLocalDate().toString();
+        }
+        if ("month".equals(type))
+        {
+            return now.plusMonths(1).toLocalDate().toString();
         }
         return now.plusYears(1).toLocalDate().toString();
     }
