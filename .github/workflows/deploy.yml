@@ -89,20 +89,83 @@ jobs:
 
           get_mysql_root_password() {
             python3 - <<'PY'
-          import os, re, subprocess, sys
-          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
-          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
-          if not os.path.exists(log):
-              sys.exit(1)
-          text = open(log, errors="ignore").read()
-          for match in re.finditer(pattern, text):
-              password = match.group(1).strip()
-              if not (3 <= len(password) <= 80):
-                  continue
+          import glob, json, os, re, subprocess, sys
+
+          patterns = [
+              r"(?im)^\s*(?:mysql_root|root_password|root_pwd|mysql_password|password|passwd|pwd)\s*[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:mysql|root)[^\n\r]{0,50}(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+          ]
+
+          def valid(password):
+              if password is None or not (0 <= len(password) <= 120):
+                  return False
               env = os.environ.copy()
-              env["MYSQL_PWD"] = password
-              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              if result.returncode == 0:
+              if password:
+                  env["MYSQL_PWD"] = password
+              else:
+                  env.pop("MYSQL_PWD", None)
+              result = subprocess.run(
+                  ["mysql", "-uroot", "-N", "-e", "select 1"],
+                  env=env,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              return result.returncode == 0
+
+          def add(candidate, values):
+              if candidate is None:
+                  return
+              candidate = str(candidate).strip().strip("'\"")
+              if 0 <= len(candidate) <= 120 and candidate not in values:
+                  values.append(candidate)
+
+          candidates = []
+          add("", candidates)
+          add("123456", candidates)
+
+          paths = [
+              "/root/.my.cnf",
+              "/etc/my.cnf",
+              "/etc/mysql/my.cnf",
+              "/www/server/panel/config/config.json",
+              "/www/server/panel/default.pl",
+          ]
+          for pattern in (
+              "/www/server/panel/logs/installed/*.log",
+              "/www/server/panel/logs/*.log",
+              "/www/server/panel/data/*",
+              "/www/server/panel/config/*",
+          ):
+              paths.extend(glob.glob(pattern))
+
+          for path in dict.fromkeys(paths):
+              if not os.path.isfile(path):
+                  continue
+              try:
+                  text = open(path, errors="ignore").read()
+              except Exception:
+                  continue
+              if path.endswith(".json"):
+                  try:
+                      def walk(value):
+                          if isinstance(value, dict):
+                              for key, child in value.items():
+                                  if any(token in key.lower() for token in ("mysql", "root", "pass", "pwd")):
+                                      add(child, candidates)
+                                  walk(child)
+                          elif isinstance(value, list):
+                              for child in value:
+                                  walk(child)
+                      walk(json.loads(text))
+                  except Exception:
+                      pass
+              for pattern in patterns:
+                  for match in re.finditer(pattern, text):
+                      add(match.group(1), candidates)
+
+          for password in candidates:
+              if valid(password):
                   print(password)
                   sys.exit(0)
           sys.exit(1)
@@ -334,20 +397,83 @@ jobs:
 
           get_mysql_root_password() {
             python3 - <<'PY'
-          import os, re, subprocess, sys
-          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
-          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
-          if not os.path.exists(log):
-              sys.exit(1)
-          text = open(log, errors="ignore").read()
-          for match in re.finditer(pattern, text):
-              password = match.group(1).strip()
-              if not (3 <= len(password) <= 80):
-                  continue
+          import glob, json, os, re, subprocess, sys
+
+          patterns = [
+              r"(?im)^\s*(?:mysql_root|root_password|root_pwd|mysql_password|password|passwd|pwd)\s*[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:mysql|root)[^\n\r]{0,50}(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+          ]
+
+          def valid(password):
+              if password is None or not (0 <= len(password) <= 120):
+                  return False
               env = os.environ.copy()
-              env["MYSQL_PWD"] = password
-              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              if result.returncode == 0:
+              if password:
+                  env["MYSQL_PWD"] = password
+              else:
+                  env.pop("MYSQL_PWD", None)
+              result = subprocess.run(
+                  ["mysql", "-uroot", "-N", "-e", "select 1"],
+                  env=env,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              return result.returncode == 0
+
+          def add(candidate, values):
+              if candidate is None:
+                  return
+              candidate = str(candidate).strip().strip("'\"")
+              if 0 <= len(candidate) <= 120 and candidate not in values:
+                  values.append(candidate)
+
+          candidates = []
+          add("", candidates)
+          add("123456", candidates)
+
+          paths = [
+              "/root/.my.cnf",
+              "/etc/my.cnf",
+              "/etc/mysql/my.cnf",
+              "/www/server/panel/config/config.json",
+              "/www/server/panel/default.pl",
+          ]
+          for pattern in (
+              "/www/server/panel/logs/installed/*.log",
+              "/www/server/panel/logs/*.log",
+              "/www/server/panel/data/*",
+              "/www/server/panel/config/*",
+          ):
+              paths.extend(glob.glob(pattern))
+
+          for path in dict.fromkeys(paths):
+              if not os.path.isfile(path):
+                  continue
+              try:
+                  text = open(path, errors="ignore").read()
+              except Exception:
+                  continue
+              if path.endswith(".json"):
+                  try:
+                      def walk(value):
+                          if isinstance(value, dict):
+                              for key, child in value.items():
+                                  if any(token in key.lower() for token in ("mysql", "root", "pass", "pwd")):
+                                      add(child, candidates)
+                                  walk(child)
+                          elif isinstance(value, list):
+                              for child in value:
+                                  walk(child)
+                      walk(json.loads(text))
+                  except Exception:
+                      pass
+              for pattern in patterns:
+                  for match in re.finditer(pattern, text):
+                      add(match.group(1), candidates)
+
+          for password in candidates:
+              if valid(password):
                   print(password)
                   sys.exit(0)
           sys.exit(1)
@@ -403,20 +529,83 @@ jobs:
 
           get_mysql_root_password() {
             python3 - <<'PY'
-          import os, re, subprocess, sys
-          log = "/www/server/panel/logs/installed/mysql-8.4_1775550897.log"
-          pattern = r"(?i)(?:password|passwd|pwd|root)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)"
-          if not os.path.exists(log):
-              sys.exit(1)
-          text = open(log, errors="ignore").read()
-          for match in re.finditer(pattern, text):
-              password = match.group(1).strip()
-              if not (3 <= len(password) <= 80):
-                  continue
+          import glob, json, os, re, subprocess, sys
+
+          patterns = [
+              r"(?im)^\s*(?:mysql_root|root_password|root_pwd|mysql_password|password|passwd|pwd)\s*[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:mysql|root)[^\n\r]{0,50}(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+              r"(?i)(?:password|passwd|pwd)[^\n\r:=]{0,30}[:=]\s*['\"]?([^'\"\s,;]+)",
+          ]
+
+          def valid(password):
+              if password is None or not (0 <= len(password) <= 120):
+                  return False
               env = os.environ.copy()
-              env["MYSQL_PWD"] = password
-              result = subprocess.run(["mysql", "-uroot", "-e", "select 1"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              if result.returncode == 0:
+              if password:
+                  env["MYSQL_PWD"] = password
+              else:
+                  env.pop("MYSQL_PWD", None)
+              result = subprocess.run(
+                  ["mysql", "-uroot", "-N", "-e", "select 1"],
+                  env=env,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              return result.returncode == 0
+
+          def add(candidate, values):
+              if candidate is None:
+                  return
+              candidate = str(candidate).strip().strip("'\"")
+              if 0 <= len(candidate) <= 120 and candidate not in values:
+                  values.append(candidate)
+
+          candidates = []
+          add("", candidates)
+          add("123456", candidates)
+
+          paths = [
+              "/root/.my.cnf",
+              "/etc/my.cnf",
+              "/etc/mysql/my.cnf",
+              "/www/server/panel/config/config.json",
+              "/www/server/panel/default.pl",
+          ]
+          for pattern in (
+              "/www/server/panel/logs/installed/*.log",
+              "/www/server/panel/logs/*.log",
+              "/www/server/panel/data/*",
+              "/www/server/panel/config/*",
+          ):
+              paths.extend(glob.glob(pattern))
+
+          for path in dict.fromkeys(paths):
+              if not os.path.isfile(path):
+                  continue
+              try:
+                  text = open(path, errors="ignore").read()
+              except Exception:
+                  continue
+              if path.endswith(".json"):
+                  try:
+                      def walk(value):
+                          if isinstance(value, dict):
+                              for key, child in value.items():
+                                  if any(token in key.lower() for token in ("mysql", "root", "pass", "pwd")):
+                                      add(child, candidates)
+                                  walk(child)
+                          elif isinstance(value, list):
+                              for child in value:
+                                  walk(child)
+                      walk(json.loads(text))
+                  except Exception:
+                      pass
+              for pattern in patterns:
+                  for match in re.finditer(pattern, text):
+                      add(match.group(1), candidates)
+
+          for password in candidates:
+              if valid(password):
                   print(password)
                   sys.exit(0)
           sys.exit(1)
