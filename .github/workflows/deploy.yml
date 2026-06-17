@@ -172,14 +172,24 @@ jobs:
           PY
           }
 
+          if [ -f "$APP_DIR/.db.env" ]; then
+            set -a
+            . "$APP_DIR/.db.env"
+            set +a
+          fi
+
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
+          DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
           DB_PASSWORD_ARGS=()
-          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
-            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
-            DB_PASSWORD_ARGS=(--spring.datasource.druid.master.password="$MYSQL_ROOT_PASSWORD")
-            echo "mysql root password detected for backend recovery"
+          DB_PASSWORD_ARGS=(--spring.datasource.druid.master.username="$DB_USERNAME")
+          if [ -n "$DB_PASSWORD" ]; then
+            export SPRING_DATASOURCE_DRUID_MASTER_USERNAME="$DB_USERNAME"
+            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$DB_PASSWORD"
+            DB_PASSWORD_ARGS+=(--spring.datasource.druid.master.password="$DB_PASSWORD")
+            echo "database credentials detected for backend recovery"
           else
-            echo "mysql root password not detected for backend recovery"
+            echo "database credentials not detected for backend recovery"
           fi
 
           cd "$APP_DIR"
@@ -488,7 +498,92 @@ jobs:
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
           if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
-            echo "mysql root password not detected, skip database bootstrap"
+            APP_DIR="/www/wwwroot/wangkejava"
+            APP_DB_ENV="$APP_DIR/.db.env"
+            APP_DB_USER="wangke_app"
+
+            if [ -f "$APP_DB_ENV" ]; then
+              set -a
+              . "$APP_DB_ENV"
+              set +a
+              if [ -n "${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-}" ] && MYSQL_PWD="$SPRING_DATASOURCE_DRUID_MASTER_PASSWORD" mysql -u"${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-$APP_DB_USER}" -N -e "select 1" ha >/dev/null 2>&1; then
+                echo "existing app database credentials are valid"
+                exit 0
+              fi
+            fi
+
+            echo "mysql root password not detected, repairing app database credentials"
+            mkdir -p "$APP_DIR"
+            APP_DB_PASSWORD="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+          )"
+
+            MYSQL_SERVICE=""
+            for svc in mysqld mysql mariadb; do
+              if systemctl list-unit-files "$svc.service" >/dev/null 2>&1; then
+                MYSQL_SERVICE="$svc"
+                break
+              fi
+            done
+            [ -n "$MYSQL_SERVICE" ] || MYSQL_SERVICE="mysqld"
+
+            MYSQLD_SAFE="$(command -v mysqld_safe || true)"
+            if [ -z "$MYSQLD_SAFE" ]; then
+              MYSQLD_SAFE="$(find /www/server/mysql /usr/local/mysql /usr -name mysqld_safe -type f 2>/dev/null | head -n 1 || true)"
+            fi
+            if [ -z "$MYSQLD_SAFE" ]; then
+              echo "mysqld_safe not found, skip database bootstrap"
+              exit 0
+            fi
+
+            systemctl stop "$MYSQL_SERVICE" >/dev/null 2>&1 || true
+            sleep 5
+            nohup "$MYSQLD_SAFE" --skip-grant-tables --skip-networking >/tmp/wangke-mysql-repair.log 2>&1 &
+            for i in $(seq 1 45); do
+              if mysql -uroot -N -e "select 1" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 2
+            done
+            if ! mysql -uroot -N -e "select 1" >/dev/null 2>&1; then
+              echo "mysql repair mode did not start"
+              tail -n 80 /tmp/wangke-mysql-repair.log || true
+              mysqladmin -uroot shutdown >/dev/null 2>&1 || true
+              systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 || true
+              exit 0
+            fi
+
+            mysql -uroot <<SQL
+          FLUSH PRIVILEGES;
+          CREATE DATABASE IF NOT EXISTS ha DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+          CREATE USER IF NOT EXISTS '$APP_DB_USER'@'localhost' IDENTIFIED BY '$APP_DB_PASSWORD';
+          ALTER USER '$APP_DB_USER'@'localhost' IDENTIFIED BY '$APP_DB_PASSWORD';
+          GRANT ALL PRIVILEGES ON ha.* TO '$APP_DB_USER'@'localhost';
+          FLUSH PRIVILEGES;
+          SQL
+
+            mysqladmin -uroot shutdown >/dev/null 2>&1 || true
+            sleep 5
+            systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 || true
+            for i in $(seq 1 45); do
+              if MYSQL_PWD="$APP_DB_PASSWORD" mysql -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
+                break
+              fi
+              sleep 2
+            done
+            if MYSQL_PWD="$APP_DB_PASSWORD" mysql -u"$APP_DB_USER" -N -e "select 1" ha >/dev/null 2>&1; then
+              cat > "$APP_DB_ENV" <<EOF
+          SPRING_DATASOURCE_DRUID_MASTER_USERNAME=$APP_DB_USER
+          SPRING_DATASOURCE_DRUID_MASTER_PASSWORD=$APP_DB_PASSWORD
+          EOF
+              chmod 600 "$APP_DB_ENV"
+              echo "app database credentials repaired"
+              exit 0
+            fi
+
+            echo "app database credential repair failed"
             exit 0
           fi
 
@@ -618,14 +713,24 @@ jobs:
           PY
           }
 
+          if [ -f "$APP_DIR/.db.env" ]; then
+            set -a
+            . "$APP_DIR/.db.env"
+            set +a
+          fi
+
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
+          DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
+          DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
           DB_PASSWORD_ARGS=()
-          if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
-            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$MYSQL_ROOT_PASSWORD"
-            DB_PASSWORD_ARGS=(--spring.datasource.druid.master.password="$MYSQL_ROOT_PASSWORD")
-            echo "mysql root password detected for backend startup"
+          DB_PASSWORD_ARGS=(--spring.datasource.druid.master.username="$DB_USERNAME")
+          if [ -n "$DB_PASSWORD" ]; then
+            export SPRING_DATASOURCE_DRUID_MASTER_USERNAME="$DB_USERNAME"
+            export SPRING_DATASOURCE_DRUID_MASTER_PASSWORD="$DB_PASSWORD"
+            DB_PASSWORD_ARGS+=(--spring.datasource.druid.master.password="$DB_PASSWORD")
+            echo "database credentials detected for backend startup"
           else
-            echo "mysql root password not detected for backend startup"
+            echo "database credentials not detected for backend startup"
           fi
 
           cd "$APP_DIR"
