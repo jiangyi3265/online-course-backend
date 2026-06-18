@@ -1855,7 +1855,9 @@ public class CourseApiController
             persistData();
         }
         enrichActivationCodes();
-        return AjaxResult.success(activationCodes);
+        List<Map<String, Object>> rows = copyList(activationCodes);
+        rows.sort((a, b) -> activationSortKey(b).compareTo(activationSortKey(a)));
+        return AjaxResult.success(rows);
     }
 
     @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_ADD + "')")
@@ -5409,6 +5411,11 @@ public class CourseApiController
         card.put("expired", activationCardExpired(card));
         card.put("activeUsed", activationCardActiveUsed(card));
         card.put("displayStatus", activationDisplayStatus(card));
+    }
+
+    private static String activationSortKey(Map<String, Object> card)
+    {
+        return firstNonBlank(card.get("activatedAt"), card.get("updatedAt"), card.get("createdAt"));
     }
 
     private static void normalizeActivationCardState(Map<String, Object> card)
