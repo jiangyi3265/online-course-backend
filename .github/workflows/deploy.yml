@@ -177,10 +177,37 @@ jobs:
             . "$APP_DIR/.db.env"
             set +a
           fi
+          if [ ! -f "$APP_DIR/.app.env" ]; then
+            {
+              printf 'RUOYI_TOKEN_SECRET='
+              python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(48))
+          PY
+              printf 'RUOYI_DRUID_PASSWORD='
+              python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+            } > "$APP_DIR/.app.env"
+            chmod 600 "$APP_DIR/.app.env"
+          fi
+          if [ -f "$APP_DIR/.app.env" ]; then
+            set -a
+            . "$APP_DIR/.app.env"
+            set +a
+          fi
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
           DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
           DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
+          APP_SECRET_ARGS=()
+          if [ -n "${RUOYI_TOKEN_SECRET:-}" ]; then
+            APP_SECRET_ARGS+=(--token.secret="$RUOYI_TOKEN_SECRET")
+          fi
+          if [ -n "${RUOYI_DRUID_PASSWORD:-}" ]; then
+            APP_SECRET_ARGS+=(--spring.datasource.druid.stat-view-servlet.login-password="$RUOYI_DRUID_PASSWORD")
+          fi
           DB_PASSWORD_ARGS=()
           DB_PASSWORD_ARGS=(
             --spring.datasource.druid.master.url="jdbc:mysql://127.0.0.1:3306/ha?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
@@ -205,6 +232,7 @@ jobs:
             --ruoyi.profile="$APP_DIR/uploadPath" \
             --server.port="$APP_PORT" \
             "${DB_PASSWORD_ARGS[@]}" \
+            "${APP_SECRET_ARGS[@]}" \
             > "$LOG_FILE" 2>&1 &
 
           for i in $(seq 1 45); do
@@ -764,10 +792,37 @@ jobs:
             . "$APP_DIR/.db.env"
             set +a
           fi
+          if [ ! -f "$APP_DIR/.app.env" ]; then
+            {
+              printf 'RUOYI_TOKEN_SECRET='
+              python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(48))
+          PY
+              printf 'RUOYI_DRUID_PASSWORD='
+              python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+            } > "$APP_DIR/.app.env"
+            chmod 600 "$APP_DIR/.app.env"
+          fi
+          if [ -f "$APP_DIR/.app.env" ]; then
+            set -a
+            . "$APP_DIR/.app.env"
+            set +a
+          fi
 
           MYSQL_ROOT_PASSWORD="$(get_mysql_root_password || true)"
           DB_USERNAME="${SPRING_DATASOURCE_DRUID_MASTER_USERNAME:-root}"
           DB_PASSWORD="${SPRING_DATASOURCE_DRUID_MASTER_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
+          APP_SECRET_ARGS=()
+          if [ -n "${RUOYI_TOKEN_SECRET:-}" ]; then
+            APP_SECRET_ARGS+=(--token.secret="$RUOYI_TOKEN_SECRET")
+          fi
+          if [ -n "${RUOYI_DRUID_PASSWORD:-}" ]; then
+            APP_SECRET_ARGS+=(--spring.datasource.druid.stat-view-servlet.login-password="$RUOYI_DRUID_PASSWORD")
+          fi
           DB_PASSWORD_ARGS=()
           DB_PASSWORD_ARGS=(
             --spring.datasource.druid.master.url="jdbc:mysql://127.0.0.1:3306/ha?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
@@ -792,6 +847,7 @@ jobs:
             --ruoyi.profile="$APP_DIR/uploadPath" \
             --server.port="$APP_PORT" \
             "${DB_PASSWORD_ARGS[@]}" \
+            "${APP_SECRET_ARGS[@]}" \
             >> "$LOG_FILE" 2>&1
           RUNNER
           chmod +x "$APP_DIR/run-$SERVICE_NAME.sh"
