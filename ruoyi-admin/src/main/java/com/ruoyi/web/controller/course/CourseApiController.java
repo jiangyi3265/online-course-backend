@@ -606,6 +606,7 @@ public class CourseApiController
                 videoUrl = lessonVideo;
             }
         }
+        boolean locked = lessonVideoLocked(user, courseId, lessonId);
         Map<String, Object> data = map(
             "id", lessonId,
             "title", lessonId,
@@ -616,9 +617,36 @@ public class CourseApiController
             "prevTitle", lessonId.contains("奇偶") ? "1.集合逻辑不等式" : "",
             "nextTitle", lessonId.contains("集合") ? "2.奇偶性与单调性" : "下一讲",
             "card", map("title", "讲点卡", "items", Arrays.asList("先看题目条件，圈出关键词。", "写出对应知识点公式或定义。", "完成例题后进入真题讲练巩固。")),
-            "progress", lessonProgress.get(progressKey(user, lessonId))
+            "progress", lessonProgress.get(progressKey(user, lessonId)),
+            "locked", locked,
+            "lockReason", locked ? "请按课程顺序学习：完成上一节视频（达95%）及其配套练习后，再解锁本节。" : ""
         );
         return AjaxResult.success(data);
+    }
+
+    // 月卡顺序解锁：返回本课程当前用户被锁定的课时视频/配套练习标题（非月卡返回 enabled=false 空集）
+    @GetMapping("/app/course/lesson-locks")
+    public AjaxResult courseLessonLocks(@RequestParam(required = false, defaultValue = "") String courseId, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        List<String> lockedVideos = new ArrayList<>();
+        List<String> lockedPractices = new ArrayList<>();
+        boolean enabled = isMonthCardCourse(user, courseId);
+        if (enabled)
+        {
+            for (String title : lessonPredecessorMap(courseId).keySet())
+            {
+                if (lessonVideoLocked(user, courseId, title))
+                {
+                    lockedVideos.add(title);
+                }
+                if (lessonPracticeLocked(user, courseId, title))
+                {
+                    lockedPractices.add(title);
+                }
+            }
+        }
+        return AjaxResult.success(map("enabled", enabled, "lockedVideos", lockedVideos, "lockedPractices", lockedPractices));
     }
 
     @PostMapping("/app/lesson/progress")
@@ -711,8 +739,15 @@ public class CourseApiController
     public AjaxResult practice(@RequestParam String title,
                                @RequestParam(required = false, defaultValue = "") String questionIds,
                                @RequestParam(required = false, defaultValue = "practice") String type,
-                               @RequestParam(required = false, defaultValue = "") String courseId)
+                               @RequestParam(required = false, defaultValue = "") String courseId,
+                               @RequestParam(required = false, defaultValue = "") String practiceTitle,
+                               HttpServletRequest request)
     {
+        // 月卡：配套练习需本节视频达 95% 才能进入（practiceTitle 即本节课时标题）
+        if (practiceTitle.length() > 0 && lessonPracticeLocked(currentUser(request), courseId, practiceTitle))
+        {
+            return AjaxResult.error("请先将本节课视频观看至95%后，再做配套练习");
+        }
         List<String> ids = commaList(questionIds);
         List<Map<String, Object>> source = ids.isEmpty() ? questionsFor(title) : questionsByIds(ids);
         if (shouldAutoDrawQuestions(type, title))
@@ -1811,7 +1846,8 @@ public class CourseApiController
     @GetMapping("/admin/activation-codes")
     public AjaxResult adminActivationCodes()
     {
-        if (reconcileActivationCardsFromOrders())
+        boolean purged = runRetentionPurgeIfDue();
+        if (reconcileActivationCardsFromOrders() || purged)
         {
             persistData();
         }
@@ -1956,6 +1992,34 @@ public class CourseApiController
         logOperation("激活码管理", card.get("ownerName"), card.get("courseTitle"), "删除激活码：" + card.get("code"), "已完成");
         persistData();
         return AjaxResult.success();
+    }
+
+    // 清除单个学生的学习记录（按该激活码的学生+课程范围），释放内存（Phase 4 - 5.5）
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_EDIT + "')")
+    @PostMapping("/admin/activation-codes/{id}/clear-study-records")
+    public AjaxResult clearActivationStudyRecords(@PathVariable String id)
+    {
+        Map<String, Object> card = findById(activationCodes, id);
+        if (card == null)
+        {
+            return AjaxResult.error("激活码不存在");
+        }
+        String userId = str(card.get("usedByUserId"));
+        if (userId.length() == 0)
+        {
+            return AjaxResult.error("该激活码尚未被学生使用，没有可清除的学习记录");
+        }
+        String courseId = str(card.get("courseId"));
+        if (courseId.length() == 0)
+        {
+            // 防止误删：未绑定课程的激活码不允许清除（否则会清空该学生全部课程的记录）
+            return AjaxResult.error("该激活码未绑定具体课程，无法清除学习记录");
+        }
+        int removed = purgeStudyRecords(userId, courseId);
+        logOperation("激活码管理", card.get("usedByName"), card.get("courseTitle"),
+            "清除学生学习记录：" + str(card.get("code")) + "（共" + removed + "条）", "已完成");
+        persistData();
+        return AjaxResult.success(map("removed", removed));
     }
 
     @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_CODES_CLOSE + "')")
@@ -3299,6 +3363,7 @@ public class CourseApiController
             "courseTitle", resolveCourseTitle(payload.get("courseId")),
             "subjectTitle", resolveSubjectTitle(payload.get("courseId")),
             "title", title,
+            "practiceTitle", str(payload.get("practiceTitle")),
             "type", type,
             "sourceType", sourceLabel(type),
             "total", details.size(),
@@ -6621,6 +6686,339 @@ public class CourseApiController
         if (changed)
         {
             // Avoid persisting from class initialization paths; runtime callers will save through the controller instance.
+        }
+    }
+
+    // ====== 月卡顺序解锁（Phase 3）/ 学习记录清理与留存（Phase 4） ======
+    private static LocalDate lastRetentionPurgeDate = null;
+    private static final int LESSON_UNLOCK_PERCENT = 95;
+
+    // 当前 (用户, 课程) 是否使用「月卡」且授权有效；只有月卡才受顺序解锁限制
+    private static boolean isMonthCardCourse(Map<String, Object> user, String courseId)
+    {
+        if (user == null || str(courseId).length() == 0)
+        {
+            return false;
+        }
+        Map<String, Object> enrollment = findEnrollment(user, courseId);
+        if (enrollment == null || !isEnrollmentOpen(enrollment))
+        {
+            return false;
+        }
+        return "month".equals(normalizeCardType(enrollment.get("cardType")));
+    }
+
+    private static boolean lessonVideoDone(Map<String, Object> user, String lessonTitle)
+    {
+        Map<String, Object> progress = lessonProgress.get(progressKey(user, lessonTitle));
+        return progress != null && intValue(progress.get("percent")) >= LESSON_UNLOCK_PERCENT;
+    }
+
+    // 本节配套练习是否完成：存在一条该课程、该课时（practiceTitle 或 title 命中）的练习/巩固记录即视为完成
+    private static boolean lessonPracticeDone(Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        if (user == null || str(lessonTitle).length() == 0)
+        {
+            return false;
+        }
+        String uid = str(user.get("id"));
+        for (Map<String, Object> attempt : attempts)
+        {
+            if (!uid.equals(str(attempt.get("userId"))))
+            {
+                continue;
+            }
+            if (str(courseId).length() > 0 && !courseId.equals(str(attempt.get("courseId"))))
+            {
+                continue;
+            }
+            String type = str(attempt.get("type"));
+            if (!"practice".equals(type) && !"reinforce".equals(type))
+            {
+                continue;
+            }
+            if (lessonTitle.equals(str(attempt.get("practiceTitle"))) || lessonTitle.equals(str(attempt.get("title"))))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Object> findLessonNode(String courseId, String lessonTitle)
+    {
+        Map<String, Object> course = findCourse(courseId);
+        if (course == null || str(lessonTitle).length() == 0)
+        {
+            return null;
+        }
+        Map<String, Object> hit = findLessonNodeInChapters(mapList(course.get("chapters")), lessonTitle);
+        if (hit != null)
+        {
+            return hit;
+        }
+        for (Map<String, Object> version : mapList(course.get("versions")))
+        {
+            hit = findLessonNodeInChapters(mapList(version.get("chapters")), lessonTitle);
+            if (hit != null)
+            {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Object> findLessonNodeInChapters(List<Map<String, Object>> chapters, String lessonTitle)
+    {
+        for (Map<String, Object> chapter : chapters)
+        {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
+            List<Map<String, Object>> items = mapList(chapter.get("items"));
+            if (items.isEmpty())
+            {
+                if (lessonTitle.equals(str(chapter.get("title"))))
+                {
+                    return chapter;
+                }
+                continue;
+            }
+            for (Map<String, Object> item : items)
+            {
+                if (!isHidden(item) && lessonTitle.equals(str(item.get("title"))))
+                {
+                    return item;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean lessonHasPractice(String courseId, String lessonTitle)
+    {
+        Map<String, Object> node = findLessonNode(courseId, lessonTitle);
+        if (node == null)
+        {
+            return false;
+        }
+        for (Map<String, Object> child : mapList(node.get("children")))
+        {
+            if (intValue(child.get("type")) == 2
+                && (!stringList(child.get("questionIds")).isEmpty() || intValue(child.get("total")) > 0))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 课时前驱表：每条「轨道」（顶层章节、各版本）内部按出现顺序记录每个课时的上一节；首节前驱为空
+    private static Map<String, String> lessonPredecessorMap(String courseId)
+    {
+        Map<String, String> predecessors = new LinkedHashMap<>();
+        Map<String, Object> course = findCourse(courseId);
+        if (course == null)
+        {
+            return predecessors;
+        }
+        addTrackPredecessors(predecessors, mapList(course.get("chapters")));
+        for (Map<String, Object> version : mapList(course.get("versions")))
+        {
+            addTrackPredecessors(predecessors, mapList(version.get("chapters")));
+        }
+        return predecessors;
+    }
+
+    private static void addTrackPredecessors(Map<String, String> predecessors, List<Map<String, Object>> chapters)
+    {
+        String previous = null;
+        for (Map<String, Object> chapter : chapters)
+        {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
+            List<Map<String, Object>> items = mapList(chapter.get("items"));
+            if (items.isEmpty())
+            {
+                String title = str(chapter.get("title"));
+                if (title.length() == 0)
+                {
+                    continue;
+                }
+                recordPredecessor(predecessors, title, previous);
+                previous = title;
+                continue;
+            }
+            for (Map<String, Object> item : items)
+            {
+                if (isHidden(item))
+                {
+                    continue;
+                }
+                String title = str(item.get("title"));
+                if (title.length() == 0)
+                {
+                    continue;
+                }
+                recordPredecessor(predecessors, title, previous);
+                previous = title;
+            }
+        }
+    }
+
+    // 同名课时若跨多个轨道（不同版本）且前驱不一致，则置空 → 不锁（fail-open），避免把某版本课时误锁在另一版本之后
+    private static void recordPredecessor(Map<String, String> predecessors, String title, String previous)
+    {
+        String current = previous == null ? "" : previous;
+        if (predecessors.containsKey(title))
+        {
+            if (!current.equals(predecessors.get(title)))
+            {
+                predecessors.put(title, "");
+            }
+            return;
+        }
+        predecessors.put(title, current);
+    }
+
+    private static boolean lessonComplete(Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        if (!lessonVideoDone(user, lessonTitle))
+        {
+            return false;
+        }
+        return !lessonHasPractice(courseId, lessonTitle) || lessonPracticeDone(user, courseId, lessonTitle);
+    }
+
+    // 课时视频是否被锁：仅月卡生效；上一节（视频达 95% 且配套练习完成）未完成则锁。任何不确定 → 不锁（fail-open）
+    private static boolean lessonVideoLocked(Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        if (!isMonthCardCourse(user, courseId))
+        {
+            return false;
+        }
+        Map<String, String> predecessors = lessonPredecessorMap(courseId);
+        if (!predecessors.containsKey(lessonTitle))
+        {
+            return false;
+        }
+        String previous = predecessors.get(lessonTitle);
+        if (previous == null || previous.length() == 0)
+        {
+            return false;
+        }
+        return !lessonComplete(user, courseId, previous);
+    }
+
+    // 配套练习是否被锁：本节视频未达 95% 则锁
+    private static boolean lessonPracticeLocked(Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        if (!isMonthCardCourse(user, courseId) || str(lessonTitle).length() == 0)
+        {
+            return false;
+        }
+        return !lessonVideoDone(user, lessonTitle);
+    }
+
+    // 清除单个学生（可指定课程）的学习记录，释放内存（Phase 4 - 5.5）
+    private static int purgeStudyRecords(String userId, String courseId)
+    {
+        if (str(userId).length() == 0)
+        {
+            return 0;
+        }
+        boolean scoped = str(courseId).length() > 0;
+        int removed = 0;
+        // 与 persistData 同锁，避免与并发的练习/进度写入产生竞态
+        synchronized (storeLock)
+        {
+            int progressBefore = lessonProgress.size();
+            lessonProgress.entrySet().removeIf(entry ->
+            {
+                Map<String, Object> value = entry.getValue();
+                return userId.equals(str(value.get("userId"))) && (!scoped || courseId.equals(str(value.get("courseId"))));
+            });
+            removed += progressBefore - lessonProgress.size();
+            removed += removeRecordsForUser(attempts, userId, courseId, scoped);
+            removed += removeRecordsForUser(wrongQuestions, userId, courseId, scoped);
+            removed += removeRecordsForUser(lessonRatings, userId, courseId, scoped);
+        }
+        return removed;
+    }
+
+    private static int removeRecordsForUser(List<Map<String, Object>> list, String userId, String courseId, boolean scoped)
+    {
+        int before = list.size();
+        list.removeIf(item -> userId.equals(str(item.get("userId"))) && (!scoped || courseId.equals(str(item.get("courseId")))));
+        return before - list.size();
+    }
+
+    // 关闭/到期后最长保存一年，到期自动删除（Phase 4 - 5.6）。每日最多执行一次，懒触发。
+    // 返回 true 表示有记录被清除，由调用方（实例方法）负责持久化。
+    private static boolean runRetentionPurgeIfDue()
+    {
+        LocalDate today = LocalDate.now();
+        if (today.equals(lastRetentionPurgeDate))
+        {
+            return false;
+        }
+        lastRetentionPurgeDate = today;
+        return purgeExpiredStudyRecords();
+    }
+
+    private static boolean purgeExpiredStudyRecords()
+    {
+        LocalDate cutoff = LocalDate.now().minusYears(1);
+        boolean changed = false;
+        for (Map<String, Object> enrollment : new ArrayList<>(enrollments))
+        {
+            String status = str(enrollment.get("status"));
+            boolean closed = "closed".equals(status);
+            boolean expired = "expired".equals(status)
+                || ("active".equals(status) && isExpired(str(enrollment.get("expiry"))));
+            if (!closed && !expired)
+            {
+                continue;
+            }
+            LocalDate retentionStart = parseDateLoose(firstNonBlank(
+                enrollment.get("closedAt"), enrollment.get("expiredAt"), enrollment.get("expiry")));
+            if (retentionStart == null || !retentionStart.isBefore(cutoff))
+            {
+                continue;
+            }
+            String userId = str(enrollment.get("userId"));
+            String courseId = str(enrollment.get("courseId"));
+            // 重新激活会把同一 (user,course) 的报名置回 active；这里用实时 hasOpenEnrollmentForCourse
+            // 检查，若已重新激活则跳过清除，确保「重新激活保留以前记录」（5.4）成立
+            if (userId.length() == 0 || courseId.length() == 0 || hasOpenEnrollmentForCourse(userId, courseId))
+            {
+                continue;
+            }
+            if (purgeStudyRecords(userId, courseId) > 0)
+            {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static LocalDate parseDateLoose(Object value)
+    {
+        String text = str(value).trim();
+        if (text.length() < 10)
+        {
+            return null;
+        }
+        try
+        {
+            return LocalDate.parse(text.substring(0, 10));
+        }
+        catch (Exception e)
+        {
+            return null;
         }
     }
 
