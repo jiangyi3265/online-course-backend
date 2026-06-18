@@ -583,6 +583,7 @@ public class CourseApiController
         String videoUrl = SAMPLE_VIDEO_URL;
         String poster = "/static/courses/gk-shuxue-full-detail.jpg";
         Map<String, Object> course = findCourse(courseId);
+        Map<String, Object> lessonMeta = null;
         if (course != null)
         {
             String courseVideo = str(course.get("defaultVideoUrl")).trim();
@@ -599,7 +600,7 @@ public class CourseApiController
             {
                 poster = coursePoster;
             }
-            Map<String, Object> lessonMeta = findLessonMeta(lessonId, courseId);
+            lessonMeta = findLessonMeta(lessonId, courseId);
             String lessonVideo = lessonMeta == null ? "" : str(lessonMeta.get("videoUrl")).trim();
             if (lessonVideo.length() > 0)
             {
@@ -612,6 +613,8 @@ public class CourseApiController
             "title", lessonId,
             "videoUrl", videoUrl,
             "poster", poster,
+            "courseTitle", course == null ? "" : stripCourseYear(course.get("courseName")),
+            "chapterTitle", lessonMeta == null ? "" : str(lessonMeta.get("chapterTitle")),
             "duration", 18,
             "pageTotal", 1,
             "prevTitle", lessonId.contains("奇偶") ? "1.集合逻辑不等式" : "",
@@ -6046,6 +6049,23 @@ public class CourseApiController
                             "chapterTitle", chapter.get("title"),
                             "videoUrl", lessonVideoUrl(lesson)
                         );
+                    }
+                    for (Map<String, Object> child : mapList(lesson.get("children")))
+                    {
+                        if (isHidden(child))
+                        {
+                            continue;
+                        }
+                        String childTitle = firstNonBlank(child.get("title"), child.get("name")).trim();
+                        if (lessonId.equals(childTitle))
+                        {
+                            return map(
+                                "course", course,
+                                "courseId", course.get("id"),
+                                "chapterTitle", chapter.get("title"),
+                                "videoUrl", lessonVideoUrl(child).length() > 0 ? lessonVideoUrl(child) : lessonVideoUrl(lesson)
+                            );
+                        }
                     }
                 }
             }
