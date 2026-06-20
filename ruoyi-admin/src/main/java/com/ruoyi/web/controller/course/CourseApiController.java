@@ -2185,7 +2185,9 @@ public class CourseApiController
         {
             persistData();
         }
-        return AjaxResult.success(orders);
+        List<Map<String, Object>> rows = copyList(orders);
+        rows.sort((a, b) -> orderSortKey(b).compareTo(orderSortKey(a)));
+        return AjaxResult.success(rows);
     }
 
     @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_ORDERS_ADD + "')")
@@ -5416,6 +5418,11 @@ public class CourseApiController
     private static String activationSortKey(Map<String, Object> card)
     {
         return firstNonBlank(card.get("activatedAt"), card.get("updatedAt"), card.get("createdAt"));
+    }
+
+    private static String orderSortKey(Map<String, Object> order)
+    {
+        return firstNonBlank(order.get("createdAt"), order.get("activatedAt"), order.get("openedAt"), order.get("updatedAt"), order.get("closedAt"));
     }
 
     private static void normalizeActivationCardState(Map<String, Object> card)
