@@ -287,6 +287,14 @@ jobs:
           fi
 
           du -h "$PACKAGE_PATH"
+          if ! timeout 60s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "test -f '$APP_DIR/$APP_NAME'"; then
+            echo "Existing backend package not found; uploading full backend package..."
+            retry 5 timeout 8m scp $SCP_OPTS "$PACKAGE_PATH" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/$APP_NAME"
+            retry 6 timeout 2m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "cp '$RELEASE_DIR/$APP_NAME' '$APP_DIR/$APP_NAME.tmp' && mv '$APP_DIR/$APP_NAME.tmp' '$APP_DIR/$APP_NAME'"
+            echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           PATCH_ZIP="backend-class-patch.zip"
           PATCH_MANIFEST="backend-class-patch.sha256"
           python3 - <<'PY'
