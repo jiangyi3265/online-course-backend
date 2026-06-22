@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEPLOY_HOST: 101.42.94.41
+  DEPLOY_HOST: 47.108.175.236
   DEPLOY_USER: root
   DEPLOY_PORT: "22"
   APP_DIR: /www/wwwroot/wangkejava
