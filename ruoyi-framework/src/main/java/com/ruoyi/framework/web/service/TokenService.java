@@ -65,6 +65,10 @@ public class TokenService
         String token = getToken(request);
         if (StringUtils.isNotEmpty(token))
         {
+            if (token.startsWith("local-"))
+            {
+                return null;
+            }
             try
             {
                 Claims claims = parseToken(token);
