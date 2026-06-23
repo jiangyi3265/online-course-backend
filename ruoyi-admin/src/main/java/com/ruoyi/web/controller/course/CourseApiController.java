@@ -2259,6 +2259,26 @@ public class CourseApiController
         ));
     }
 
+    @PreAuthorize("@ss.hasPermi('" + CourseAdminPermissions.PERM_STUDY_LIST + "')")
+    @PutMapping("/admin/ai-chats/{id}")
+    public AjaxResult updateAdminAiChat(@PathVariable String id, @RequestBody Map<String, Object> body)
+    {
+        for (Map<String, Object> chat : aiChats)
+        {
+            if (Objects.equals(str(chat.get("id")), id))
+            {
+                chat.put("context", str(body.get("context")));
+                chat.put("message", str(body.get("message")));
+                chat.put("reply", str(body.get("reply")));
+                chat.put("updatedAt", now());
+                logOperation("AI问答", "后台管理员", chat.get("context"), "编辑AI问答记录", "已完成");
+                persistData();
+                return AjaxResult.success(chat);
+            }
+        }
+        return AjaxResult.error("AI问答记录不存在");
+    }
+
     private File dataFile()
     {
         String basePath = str(profilePath).trim();
