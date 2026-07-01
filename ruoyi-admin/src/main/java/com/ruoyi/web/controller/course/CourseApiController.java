@@ -75,6 +75,7 @@ public class CourseApiController
     private static final List<Map<String, Object>> wrongQuestions = new ArrayList<>();
     private static final List<Map<String, Object>> lessonRatings = new ArrayList<>();
     private static final List<Map<String, Object>> aiChats = new ArrayList<>();
+    private static final List<Map<String, Object>> offlineReviews = new ArrayList<>();
     private static final List<Map<String, Object>> operationLogs = new ArrayList<>();
     private static final Map<String, Object> frontendSettings = new LinkedHashMap<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
@@ -127,6 +128,7 @@ public class CourseApiController
                 restoreList(data, "wrongQuestions", wrongQuestions);
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
+                restoreList(data, "offlineReviews", offlineReviews);
                 restoreList(data, "operationLogs", operationLogs);
                 restoreMap(data, "frontendSettings", frontendSettings);
                 restoreProgress(data);
@@ -477,6 +479,65 @@ public class CourseApiController
         return AjaxResult.success(list);
     }
 
+    @GetMapping("/app/offline-reviews")
+    public AjaxResult offlineReviews(@RequestParam(required = false, defaultValue = "") String courseId,
+                                     @RequestParam(required = false, defaultValue = "") String userId,
+                                     HttpServletRequest request)
+    {
+        Map<String, Object> requester = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(requester, userId);
+        return AjaxResult.success(submittedAndDraftOfflineReviews(user, courseId, true));
+    }
+
+    @PostMapping("/app/offline-reviews")
+    public AjaxResult saveOfflineReview(@RequestBody Map<String, Object> body, HttpServletRequest request)
+    {
+        Map<String, Object> user = currentUser(request);
+        if (user == null)
+        {
+            return AjaxResult.error("请先登录");
+        }
+        String docId = str(body.get("docId")).trim();
+        if (docId.length() == 0)
+        {
+            return AjaxResult.error("文档不存在");
+        }
+        String courseId = scopedCourseId(body.get("courseId"));
+        Map<String, Object> doc = findById(docs, docId);
+        if (doc != null)
+        {
+            courseId = scopedCourseId(doc.get("courseId"));
+        }
+        String id = str(body.get("id")).trim();
+        Map<String, Object> record = findOfflineReview(id, user, docId, courseId);
+        if (record == null)
+        {
+            record = new LinkedHashMap<>();
+            record.put("id", id.length() > 0 ? id : "offline-" + UUID.randomUUID());
+            record.put("createdAt", now());
+            offlineReviews.add(record);
+        }
+        boolean submitted = boolValue(body.get("submitted"), boolValue(body.get("reviewSubmitted"), !"draft".equals(str(body.get("status")))));
+        record.put("userId", user.get("id"));
+        record.put("userName", firstNonBlank(user.get("name"), user.get("nickName"), user.get("phone")));
+        record.put("docId", docId);
+        record.put("courseId", courseId);
+        record.put("title", firstNonBlank(body.get("title"), doc == null ? "" : doc.get("title")));
+        record.put("totalScore", intValue(body.get("totalScore")));
+        record.put("score", intValue(body.get("score")));
+        record.put("wrongCount", intValue(body.get("wrongCount")));
+        List<String> images = mediaUrlList(body.get("images"));
+        record.put("images", images);
+        record.put("imageCount", Math.max(intValue(body.get("imageCount")), images.size()));
+        record.put("submitted", submitted);
+        record.put("reviewSubmitted", submitted);
+        record.put("status", submitted ? "submitted" : "draft");
+        record.put("type", "offline-paper");
+        record.put("updatedAt", now());
+        persistData();
+        return AjaxResult.success(new LinkedHashMap<>(record));
+    }
+
     @GetMapping("/app/study/summary")
     public AjaxResult studySummary()
     {
@@ -490,15 +551,16 @@ public class CourseApiController
     {
         Map<String, Object> requester = currentUser(request);
         Map<String, Object> user = resolveStudyUser(requester, userId);
-        List<Map<String, Object>> userAttempts = filterByUser(attempts, user);
+        String scopedCourseId = scopedCourseId(courseId);
+        List<Map<String, Object>> userAttempts = filterByCourse(filterByUser(attempts, user), scopedCourseId);
         String courseTitle = "";
-        Map<String, Object> course = findCourse(courseId);
+        Map<String, Object> course = findCourse(scopedCourseId);
         if (course != null)
         {
             courseTitle = stripCourseYear(course.get("courseName"));
         }
         int wrongCount = 0;
-        for (Map<String, Object> wrong : filterByUser(wrongQuestions, user))
+        for (Map<String, Object> wrong : filterByCourse(filterByUser(wrongQuestions, user), scopedCourseId))
         {
             if (!Boolean.TRUE.equals(wrong.get("mastered")))
             {
@@ -531,13 +593,14 @@ public class CourseApiController
         );
         List<Map<String, Object>> recentPractice = recentPracticeRows(userAttempts);
         List<Map<String, Object>> chapterSweep = attemptRowsByType(userAttempts, "quiz");
-        Map<String, Object> learning = learningStats(user, courseId);
+        Map<String, Object> learning = learningStats(user, scopedCourseId);
+        List<Map<String, Object>> offlineRows = submittedAndDraftOfflineReviews(user, scopedCourseId, false);
         List<String> suggestions = wrongCount > 0
             ? Arrays.asList("先复盘错题与巩固，再进入复习加强。", "每次练习后查看解析，记录易错概念。")
             : Collections.singletonList("当前错题较少，可以继续推进新章节。");
         Collections.reverse(userAttempts);
         return AjaxResult.success(map(
-            "courseId", courseId,
+            "courseId", scopedCourseId,
             "courseTitle", courseTitle,
             "summary", getStudySummary(),
             "learningStats", learning,
@@ -551,6 +614,9 @@ public class CourseApiController
             "averageScore", avg,
             "chapterSweep", chapterSweep,
             "learningRecords", learning.get("records"),
+            "offlineReviews", offlineRows,
+            "versionStats", course == null ? new ArrayList<Map<String, Object>>() : courseVersionStats(course, user),
+            "course", course == null ? new LinkedHashMap<String, Object>() : courseForApp(course, user),
             "suggestions", suggestions
         ));
     }
@@ -2348,6 +2414,7 @@ public class CourseApiController
         data.put("wrongQuestions", copyList(wrongQuestions));
         data.put("lessonRatings", copyList(lessonRatings));
         data.put("aiChats", copyList(aiChats));
+        data.put("offlineReviews", copyList(offlineReviews));
         data.put("operationLogs", copyList(operationLogs));
         data.put("frontendSettings", copyFrontendSettings());
         data.put("lessonProgress", copyProgress());
@@ -3133,6 +3200,11 @@ public class CourseApiController
 
     private static void applyComputedCourseStats(Map<String, Object> course, Map<String, Object> user)
     {
+        List<Map<String, Object>> versionStats = courseVersionStats(course, user);
+        if (!versionStats.isEmpty())
+        {
+            course.put("versionStats", versionStats);
+        }
         int lessonCount = countUploadedCourseLessons(course);
         if (lessonCount > 0)
         {
@@ -3155,11 +3227,20 @@ public class CourseApiController
     private static int countUploadedCourseLessons(Map<String, Object> course)
     {
         List<Map<String, Object>> versions = mapList(course.get("versions"));
-        List<Map<String, Object>> chapters = new ArrayList<>();
         if (!versions.isEmpty())
         {
-            chapters = mapList(versions.get(0).get("chapters"));
+            int total = 0;
+            int visibleCount = Math.min(2, versions.size());
+            for (int i = 0; i < visibleCount; i++)
+            {
+                total += countVersionLessons(versions.get(i));
+            }
+            if (total > 0)
+            {
+                return total;
+            }
         }
+        List<Map<String, Object>> chapters = new ArrayList<>();
         if (chapters.isEmpty())
         {
             chapters = mapList(course.get("chapters"));
@@ -3180,11 +3261,20 @@ public class CourseApiController
     private static int sumUploadedDurationSeconds(Map<String, Object> course)
     {
         List<Map<String, Object>> versions = mapList(course.get("versions"));
-        List<Map<String, Object>> chapters = new ArrayList<>();
         if (!versions.isEmpty())
         {
-            chapters = mapList(versions.get(0).get("chapters"));
+            int total = 0;
+            int visibleCount = Math.min(2, versions.size());
+            for (int i = 0; i < visibleCount; i++)
+            {
+                total += sumVersionDurationSeconds(versions.get(i));
+            }
+            if (total > 0)
+            {
+                return total;
+            }
         }
+        List<Map<String, Object>> chapters = new ArrayList<>();
         if (chapters.isEmpty())
         {
             chapters = mapList(course.get("chapters"));
@@ -3298,6 +3388,189 @@ public class CourseApiController
     private static boolean isHidden(Map<String, Object> item)
     {
         return item != null && Boolean.FALSE.equals(item.get("visible"));
+    }
+
+    private static Map<String, Object> findOfflineReview(String id, Map<String, Object> user, String docId, String courseId)
+    {
+        for (Map<String, Object> review : offlineReviews)
+        {
+            if (id.length() > 0 && id.equals(str(review.get("id"))))
+            {
+                return review;
+            }
+            if (sameUser(review, user) && docId.equals(str(review.get("docId"))) && courseId.equals(scopedCourseId(review.get("courseId"))))
+            {
+                return review;
+            }
+        }
+        return null;
+    }
+
+    private static List<Map<String, Object>> submittedAndDraftOfflineReviews(Map<String, Object> user, String courseId, boolean includeDraft)
+    {
+        String expected = scopedCourseId(courseId);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> review : offlineReviews)
+        {
+            if (!sameUser(review, user))
+            {
+                continue;
+            }
+            if (expected.length() > 0 && !expected.equals(scopedCourseId(review.get("courseId"))))
+            {
+                continue;
+            }
+            boolean submitted = boolValue(review.get("submitted"), boolValue(review.get("reviewSubmitted"), !"draft".equals(str(review.get("status")))));
+            if (!includeDraft && !submitted)
+            {
+                continue;
+            }
+            result.add(new LinkedHashMap<>(review));
+        }
+        result.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
+        return result;
+    }
+
+    private static List<Map<String, Object>> courseVersionStats(Map<String, Object> course, Map<String, Object> user)
+    {
+        List<Map<String, Object>> versions = mapList(course.get("versions"));
+        List<Map<String, Object>> result = new ArrayList<>();
+        int visibleCount = Math.min(2, versions.size());
+        String[] labels = new String[] {"复习加强", "技巧绝招"};
+        for (int i = 0; i < visibleCount; i++)
+        {
+            Map<String, Object> version = versions.get(i);
+            int totalLessons = countVersionLessons(version);
+            int durationSeconds = sumVersionDurationSeconds(version);
+            Map<String, Object> progress = courseVersionProgressStats(user, scopedCourseId(course.get("id")), collectVersionLessonTitles(version), totalLessons);
+            result.add(map(
+                "name", labels[i],
+                "label", labels[i],
+                "versionName", firstNonBlank(version.get("name"), labels[i]),
+                "totalLessons", totalLessons,
+                "totalDuration", secondsText(durationSeconds),
+                "durationSeconds", durationSeconds,
+                "readStudyCount", progress.get("readStudyCount"),
+                "readDuration", progress.get("readDuration"),
+                "progress", progress.get("progress")
+            ));
+        }
+        return result;
+    }
+
+    private static int countVersionLessons(Map<String, Object> version)
+    {
+        int total = 0;
+        for (Map<String, Object> chapter : mapList(version.get("chapters")))
+        {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
+            total += countLessonItems(mapList(chapter.get("items")));
+            total += countLessonItems(mapList(chapter.get("children")));
+        }
+        return total;
+    }
+
+    private static int sumVersionDurationSeconds(Map<String, Object> version)
+    {
+        int total = 0;
+        for (Map<String, Object> chapter : mapList(version.get("chapters")))
+        {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
+            total += sumDurationInItems(mapList(chapter.get("items")));
+            total += sumDurationInItems(mapList(chapter.get("children")));
+        }
+        return total;
+    }
+
+    private static Set<String> collectVersionLessonTitles(Map<String, Object> version)
+    {
+        Set<String> titles = new LinkedHashSet<>();
+        for (Map<String, Object> chapter : mapList(version.get("chapters")))
+        {
+            collectLessonTitles(mapList(chapter.get("items")), titles);
+            collectLessonTitles(mapList(chapter.get("children")), titles);
+        }
+        return titles;
+    }
+
+    private static void collectLessonTitles(List<Map<String, Object>> items, Set<String> titles)
+    {
+        collectLessonTitles(items, titles, "");
+    }
+
+    private static void collectLessonTitles(List<Map<String, Object>> items, Set<String> titles, String inheritedTitle)
+    {
+        for (Map<String, Object> item : items)
+        {
+            if (isHidden(item))
+            {
+                continue;
+            }
+            String ownTitle = firstNonBlank(item.get("lessonTitle"), item.get("title"), item.get("name"));
+            String stableTitle = ownTitle.length() > 0 ? ownTitle : inheritedTitle;
+            List<Map<String, Object>> children = mapList(item.get("children"));
+            if (!children.isEmpty())
+            {
+                collectLessonTitles(children, titles, stableTitle);
+                continue;
+            }
+            if (intValue(item.get("type")) != 2)
+            {
+                String title = firstNonBlank(item.get("lessonTitle"), item.get("title"), inheritedTitle, item.get("name"));
+                if (title.length() > 0)
+                {
+                    titles.add(normalizedLessonTitle(title));
+                }
+            }
+        }
+    }
+
+    private static Map<String, Object> courseVersionProgressStats(Map<String, Object> user, String courseId, Set<String> lessonTitles, int totalLessons)
+    {
+        int learned = 0;
+        int seconds = 0;
+        for (Map<String, Object> progress : lessonProgress.values())
+        {
+            if (!sameUser(progress, user) || !courseId.equals(scopedCourseId(progress.get("courseId"))))
+            {
+                continue;
+            }
+            String title = normalizedLessonTitle(firstNonBlank(progress.get("lessonTitle"), progress.get("sourceLessonTitle"), progress.get("title")));
+            if (!lessonTitles.isEmpty() && !lessonTitles.contains(title))
+            {
+                continue;
+            }
+            seconds += (int) Math.round(doubleValue(progress.get("currentTime")));
+            if (Boolean.TRUE.equals(progress.get("ended")) || intValue(progress.get("percent")) >= 90)
+            {
+                learned++;
+            }
+        }
+        int percent = totalLessons <= 0 ? 0 : Math.min(100, Math.round(learned * 100f / totalLessons));
+        return map("readStudyCount", learned, "readDuration", secondsText(seconds), "progress", percent);
+    }
+
+    private static String normalizedLessonTitle(Object value)
+    {
+        String normalized = stripCourseYear(value);
+        if (normalized != null)
+        {
+            normalized = normalized
+                .replaceAll("^\\s*【?\\d+[.．、]?\\s*", "")
+                .replace("【", "")
+                .replace("】", "");
+            return normalized.replaceAll("\\s+", "").trim();
+        }
+        return stripCourseYear(value)
+            .replaceAll("^\\s*\\d+[.、]\\s*", "")
+            .replaceAll("\\s+", "")
+            .trim();
     }
 
     private static Map<String, Object> courseProgressStats(Map<String, Object> user, String courseId, int totalLessons)
