@@ -526,7 +526,7 @@ public class CourseApiController
         record.put("totalScore", intValue(body.get("totalScore")));
         record.put("score", intValue(body.get("score")));
         record.put("wrongCount", intValue(body.get("wrongCount")));
-        List<String> images = mediaUrlList(body.get("images"));
+        List<String> images = stableMediaUrlList(body.get("images"));
         record.put("images", images);
         record.put("imageCount", Math.max(intValue(body.get("imageCount")), images.size()));
         record.put("submitted", submitted);
@@ -8143,6 +8143,21 @@ public class CourseApiController
             {
                 result.add(text);
             }
+        }
+        return result;
+    }
+
+    private static List<String> stableMediaUrlList(Object value)
+    {
+        List<String> result = new ArrayList<>();
+        for (String item : mediaUrlList(value))
+        {
+            String lower = item.toLowerCase();
+            if (lower.startsWith("data:") || lower.startsWith("blob:") || lower.startsWith("file:"))
+            {
+                continue;
+            }
+            result.add(item);
         }
         return result;
     }
