@@ -76,6 +76,7 @@ public class CourseApiController
     private static final List<Map<String, Object>> lessonRatings = new ArrayList<>();
     private static final List<Map<String, Object>> aiChats = new ArrayList<>();
     private static final List<Map<String, Object>> offlineReviews = new ArrayList<>();
+    private static final List<Map<String, Object>> studyCheckins = new ArrayList<>();
     private static final List<Map<String, Object>> operationLogs = new ArrayList<>();
     private static final Map<String, Object> frontendSettings = new LinkedHashMap<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
@@ -129,6 +130,7 @@ public class CourseApiController
                 restoreList(data, "lessonRatings", lessonRatings);
                 restoreList(data, "aiChats", aiChats);
                 restoreList(data, "offlineReviews", offlineReviews);
+                restoreList(data, "studyCheckins", studyCheckins);
                 restoreList(data, "operationLogs", operationLogs);
                 restoreMap(data, "frontendSettings", frontendSettings);
                 restoreProgress(data);
@@ -523,9 +525,9 @@ public class CourseApiController
         record.put("docId", docId);
         record.put("courseId", courseId);
         record.put("title", firstNonBlank(body.get("title"), doc == null ? "" : doc.get("title")));
-        record.put("totalScore", intValue(body.get("totalScore")));
-        record.put("score", intValue(body.get("score")));
-        record.put("wrongCount", intValue(body.get("wrongCount")));
+        record.put("totalScore", submitted ? intValue(body.get("totalScore")) : optionalScoreValue(body.get("totalScore")));
+        record.put("score", submitted ? intValue(body.get("score")) : optionalScoreValue(body.get("score")));
+        record.put("wrongCount", submitted ? intValue(body.get("wrongCount")) : optionalScoreValue(body.get("wrongCount")));
         List<String> images = stableMediaUrlList(body.get("images"));
         record.put("images", images);
         record.put("imageCount", Math.max(intValue(body.get("imageCount")), images.size()));
@@ -542,6 +544,75 @@ public class CourseApiController
     public AjaxResult studySummary()
     {
         return AjaxResult.success(getStudySummary());
+    }
+
+    @GetMapping("/app/study/checkins")
+    public AjaxResult studyCheckins(@RequestParam(required = false, defaultValue = "") String userId,
+                                    @RequestParam(required = false, defaultValue = "") String courseId,
+                                    HttpServletRequest request)
+    {
+        Map<String, Object> requester = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(requester, userId);
+        String scopedCourseId = scopedCourseId(courseId);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> item : studyCheckins)
+        {
+            if (!sameUser(item, user))
+            {
+                continue;
+            }
+            if (scopedCourseId.length() > 0 && str(item.get("courseId")).length() > 0
+                && !scopedCourseId.equals(scopedCourseId(item.get("courseId"))))
+            {
+                continue;
+            }
+            rows.add(normalizeStudyCheckin(item));
+        }
+        rows.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
+        return AjaxResult.success(rows);
+    }
+
+    @PostMapping("/app/study/checkins")
+    public AjaxResult saveStudyCheckin(@RequestBody Map<String, Object> body, HttpServletRequest request)
+    {
+        Map<String, Object> requester = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(requester, firstNonBlank(body.get("studentId"), body.get("userId")));
+        if (user == null)
+        {
+            return AjaxResult.error("请先登录");
+        }
+        String date = firstNonBlank(body.get("date"), now().substring(0, 10));
+        String courseId = scopedCourseId(body.get("courseId"));
+        Map<String, Object> record = null;
+        for (Map<String, Object> item : studyCheckins)
+        {
+            if (sameUser(item, user) && date.equals(str(item.get("date")))
+                && courseId.equals(scopedCourseId(item.get("courseId"))))
+            {
+                record = item;
+                break;
+            }
+        }
+        if (record == null)
+        {
+            record = new LinkedHashMap<>();
+            record.put("id", firstNonBlank(body.get("id"), "checkin-" + System.currentTimeMillis()));
+            record.put("createdAt", firstNonBlank(body.get("createdAt"), now()));
+            studyCheckins.add(record);
+        }
+        List<String> images = stableMediaUrlList(body.get("images"));
+        record.put("userId", user.get("id"));
+        record.put("studentId", user.get("id"));
+        record.put("userName", firstNonBlank(user.get("name"), user.get("nickName"), user.get("phone")));
+        record.put("courseId", courseId);
+        record.put("courseTitle", resolveCourseTitle(courseId));
+        record.put("date", date);
+        record.put("content", str(body.get("content")).trim());
+        record.put("images", images);
+        record.put("imageCount", Math.max(intValue(body.get("imageCount")), images.size()));
+        record.put("updatedAt", now());
+        persistData();
+        return AjaxResult.success(normalizeStudyCheckin(record));
     }
 
     @GetMapping("/app/study/report")
@@ -837,10 +908,11 @@ public class CourseApiController
                 return AjaxResult.error("请选择要上传的图片");
             }
             String fileName = FileUploadUtils.upload(RuoYiConfig.getUploadPath(), file);
-            String url = serverConfig.getUrl() + fileName;
+            String absoluteUrl = serverConfig.getUrl() + fileName;
             return AjaxResult.success(map(
-                "url", url,
+                "url", fileName,
                 "fileName", fileName,
+                "absoluteUrl", absoluteUrl,
                 "newFileName", FileUtils.getName(fileName),
                 "originalFilename", file.getOriginalFilename()
             ));
@@ -935,16 +1007,19 @@ public class CourseApiController
     @GetMapping("/app/wrongbook")
     public AjaxResult wrongbook(@RequestParam(required = false, defaultValue = "") String source,
                                 @RequestParam(required = false, defaultValue = "") String courseId,
+                                @RequestParam(required = false, defaultValue = "") String userId,
                                 HttpServletRequest request)
     {
-        Map<String, Object> user = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(currentUser(request), userId);
         return AjaxResult.success(wrongbookItems(filterByCourse(filterByUser(wrongQuestions, user), courseId), source));
     }
 
     @GetMapping("/app/wrongbook/summary")
-    public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId, HttpServletRequest request)
+    public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId,
+                                       @RequestParam(required = false, defaultValue = "") String userId,
+                                       HttpServletRequest request)
     {
-        Map<String, Object> user = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(currentUser(request), userId);
         List<Map<String, Object>> list = filterByCourse(filterByUser(wrongQuestions, user), courseId);
         List<Map<String, Object>> records = attemptRecords(filterByCourse(filterByUser(attempts, user), courseId), "");
         Map<String, Object> course = findCourse(courseId);
@@ -964,9 +1039,10 @@ public class CourseApiController
     @GetMapping("/app/wrongbook/records")
     public AjaxResult wrongbookRecords(@RequestParam(required = false, defaultValue = "") String source,
                                        @RequestParam(required = false, defaultValue = "") String courseId,
+                                       @RequestParam(required = false, defaultValue = "") String userId,
                                        HttpServletRequest request)
     {
-        Map<String, Object> user = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(currentUser(request), userId);
         List<Map<String, Object>> records = attemptRecords(filterByCourse(filterByUser(attempts, user), courseId), source);
         return AjaxResult.success(map(
             "total", records.size(),
@@ -978,9 +1054,10 @@ public class CourseApiController
     @GetMapping("/app/wrongbook/weak")
     public AjaxResult weakWrongbook(@RequestParam(required = false, defaultValue = "") String source,
                                     @RequestParam(required = false, defaultValue = "") String courseId,
+                                    @RequestParam(required = false, defaultValue = "") String userId,
                                     HttpServletRequest request)
     {
-        Map<String, Object> user = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(currentUser(request), userId);
         return AjaxResult.success(weakWrongItems(filterByCourse(filterByUser(wrongQuestions, user), courseId), source));
     }
 
@@ -988,9 +1065,10 @@ public class CourseApiController
     public AjaxResult wrongRetry(@RequestParam(required = false, defaultValue = "5") int count,
                                  @RequestParam(required = false, defaultValue = "") String source,
                                  @RequestParam(required = false, defaultValue = "") String courseId,
+                                 @RequestParam(required = false, defaultValue = "") String userId,
                                  HttpServletRequest request)
     {
-        Map<String, Object> user = currentUser(request);
+        Map<String, Object> user = resolveStudyUser(currentUser(request), userId);
         return AjaxResult.success(wrongRetryPaper(filterByCourse(filterByUser(wrongQuestions, user), courseId), count, source));
     }
 
@@ -1664,6 +1742,7 @@ public class CourseApiController
         {
             course.put("id", "course-" + System.currentTimeMillis());
         }
+        syncCourseIntroFields(course);
         ensureCourseDefaults(course);
         course.put("updatedAt", now());
         if (hasDuplicateCourseName(course, str(course.get("id"))))
@@ -1688,6 +1767,7 @@ public class CourseApiController
         Map<String, Object> next = new LinkedHashMap<>(course);
         next.putAll(body);
         next.put("id", id);
+        syncCourseIntroFields(next);
         ensureCourseDefaults(next);
         next.put("updatedAt", now());
         if (hasDuplicateCourseName(next, id))
@@ -2415,6 +2495,7 @@ public class CourseApiController
         data.put("lessonRatings", copyList(lessonRatings));
         data.put("aiChats", copyList(aiChats));
         data.put("offlineReviews", copyList(offlineReviews));
+        data.put("studyCheckins", copyList(studyCheckins));
         data.put("operationLogs", copyList(operationLogs));
         data.put("frontendSettings", copyFrontendSettings());
         data.put("lessonProgress", copyProgress());
@@ -3095,6 +3176,7 @@ public class CourseApiController
     private static Map<String, Object> courseListItem(Map<String, Object> course, Map<String, Object> user)
     {
         boolean available = "trial".equals(course.get("kind")) || hasActiveEnrollment(user, scopedCourseId(course.get("id")));
+        String intro = stripCourseYear(firstNonBlank(course.get("introduction"), course.get("intro"), course.get("description"), course.get("sub"), course.get("courseName")));
         return map(
             "id", course.get("id"),
             "stage", course.get("stage"),
@@ -3103,7 +3185,10 @@ public class CourseApiController
             "full", stripCourseYear(course.get("full")),
             "title", stripCourseYear(course.get("title")),
             "suffix", "trial".equals(course.get("kind")) ? "试听课" : "",
-            "sub", stripCourseYear(course.get("courseName")),
+            "sub", intro,
+            "introduction", intro,
+            "intro", intro,
+            "description", intro,
             "openMode", course.get("openMode"),
             "openText", course.get("openText"),
             "cover", course.get("cover"),
@@ -3120,10 +3205,14 @@ public class CourseApiController
     private static Map<String, Object> courseForApp(Map<String, Object> course, Map<String, Object> user)
     {
         Map<String, Object> result = objectMapper.convertValue(course, new TypeReference<Map<String, Object>>() {});
+        String intro = stripCourseYear(firstNonBlank(result.get("introduction"), result.get("intro"), result.get("description"), result.get("sub")));
         result.put("full", stripCourseYear(result.get("full")));
         result.put("title", stripCourseYear(result.get("title")));
         result.put("courseName", stripCourseYear(result.get("courseName")));
-        result.put("introduction", stripCourseYear(result.get("introduction")));
+        result.put("sub", intro);
+        result.put("introduction", intro);
+        result.put("intro", intro);
+        result.put("description", intro);
         result.put("available", hasActiveEnrollment(user, scopedCourseId(result.get("id"))));
         applyComputedCourseStats(result, user);
         applyAttemptStatusToCourse(result, user);
@@ -3704,7 +3793,8 @@ public class CourseApiController
         int selected = isChoiceQuestion(q) ? intValue(submitted) : -1;
         String selectedText = skippedQuestion ? "已跳过" : (isChoiceQuestion(q) ? optionText(q, selected) : firstNonBlank(str(submitted).trim(), noUpload ? "暂不上传" : ""));
         String answerText = correctAnswerText(q);
-        String studentAnswerImageUrl = str(answerImages.get(questionId)).trim();
+        String studentAnswerImageUrl = firstStableMediaUrl(answerImages.get(questionId));
+        List<String> studentAnswerImages = stableMediaUrlList(answerImages.get(questionId));
         int manualReviewCount = manualReview ? 1 : 0;
         int gradableCount = manualReview ? 0 : 1;
         int correctCount = ok ? 1 : 0;
@@ -3745,6 +3835,8 @@ public class CourseApiController
                 "selected", selected,
                 "selectedText", selectedText,
                 "studentAnswerImageUrl", studentAnswerImageUrl,
+                "studentAnswerImages", studentAnswerImages,
+                "answerImages", studentAnswerImages,
                 "skipped", skippedQuestion,
                 "noUpload", noUpload,
                 "reviewResult", reviewedManually ? selfReviewResult : "",
@@ -3781,6 +3873,8 @@ public class CourseApiController
             "answerImageUrl", str(q.get("answerImageUrl")),
             "answerFileUrl", str(q.get("answerFileUrl")),
             "studentAnswerImageUrl", studentAnswerImageUrl,
+            "studentAnswerImages", studentAnswerImages,
+            "answerImages", studentAnswerImages,
             "correct", ok,
             "manualReview", manualReview,
             "selfReviewed", !manualReview,
@@ -4354,6 +4448,12 @@ public class CourseApiController
             "selected", detail.get("selected"),
             "selectedText", detail.get("selectedText"),
             "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
+            "studentAnswerImages", stableMediaUrlList(detail.get("studentAnswerImages")).isEmpty()
+                ? stableMediaUrlList(detail.get("studentAnswerImageUrl"))
+                : stableMediaUrlList(detail.get("studentAnswerImages")),
+            "answerImages", stableMediaUrlList(detail.get("answerImages")).isEmpty()
+                ? stableMediaUrlList(detail.get("studentAnswerImageUrl"))
+                : stableMediaUrlList(detail.get("answerImages")),
             "reviewResult", detail.get("reviewResult"),
             "partialCredit", detail.get("partialCredit"),
             "analysis", detail.get("analysis"),
@@ -4947,6 +5047,12 @@ public class CourseApiController
                 "selfReviewed", boolValue(detail.get("selfReviewed"), false),
                 "selectedText", detail.get("selectedText"),
                 "studentAnswerImageUrl", detail.get("studentAnswerImageUrl"),
+                "studentAnswerImages", stableMediaUrlList(detail.get("studentAnswerImages")).isEmpty()
+                    ? stableMediaUrlList(detail.get("studentAnswerImageUrl"))
+                    : stableMediaUrlList(detail.get("studentAnswerImages")),
+                "answerImages", stableMediaUrlList(detail.get("answerImages")).isEmpty()
+                    ? stableMediaUrlList(detail.get("studentAnswerImageUrl"))
+                    : stableMediaUrlList(detail.get("answerImages")),
                 "answerImageUrl", detail.get("answerImageUrl"),
                 "answerFileUrl", detail.get("answerFileUrl"),
                 "reviewResult", detail.get("reviewResult"),
@@ -5237,6 +5343,7 @@ public class CourseApiController
         int todaySeconds = 0;
         int weekSeconds = 0;
         Set<String> days = new LinkedHashSet<>();
+        Set<String> checkinDays = new LinkedHashSet<>();
         LocalDate today = LocalDate.now();
         for (Map<String, Object> progress : lessonProgress.values())
         {
@@ -5265,11 +5372,29 @@ public class CourseApiController
                 }
             }
         }
+        for (Map<String, Object> checkin : studyCheckins)
+        {
+            if (!sameUser(checkin, user))
+            {
+                continue;
+            }
+            String checkinCourseId = scopedCourseId(checkin.get("courseId"));
+            if (courseId.length() > 0 && checkinCourseId.length() > 0 && !courseId.equals(checkinCourseId))
+            {
+                continue;
+            }
+            String date = str(normalizeStudyCheckin(checkin).get("date"));
+            if (date.length() > 0)
+            {
+                checkinDays.add(date);
+            }
+        }
         return map(
             "totalText", secondsText(totalSeconds),
             "todayText", secondsText(todaySeconds),
             "weekText", secondsText(weekSeconds),
             "days", days.size(),
+            "checkinDays", checkinDays.size(),
             "records", learningRecords(user)
         );
     }
@@ -5358,6 +5483,18 @@ public class CourseApiController
             return target;
         }
         return requester;
+    }
+
+    private static Map<String, Object> normalizeStudyCheckin(Map<String, Object> item)
+    {
+        Map<String, Object> row = new LinkedHashMap<>(item);
+        List<String> images = stableMediaUrlList(item.get("images"));
+        row.put("images", images);
+        row.put("imageUrls", images);
+        row.put("imageCount", Math.max(intValue(item.get("imageCount")), images.size()));
+        row.put("studentId", firstNonBlank(item.get("studentId"), item.get("userId")));
+        row.put("date", firstNonBlank(item.get("date"), str(item.get("createdAt")).length() >= 10 ? str(item.get("createdAt")).substring(0, 10) : ""));
+        return row;
     }
 
     private static boolean canViewStudent(Map<String, Object> requester, String studentUserId)
@@ -6414,6 +6551,8 @@ public class CourseApiController
             throw new IllegalArgumentException("课程不存在");
         }
         String time = now();
+        Map<String, Object> sourceCard = normalizeCardCode(cardCode).length() == 0 ? null : findActivationCode(cardCode);
+        int dailyLimitMinutes = sourceCard == null ? 0 : normalizeDailyLimit(sourceCard.get("dailyLimitMinutes"));
         Map<String, Object> order = map(
             "id", "order-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
@@ -6424,6 +6563,8 @@ public class CourseApiController
             "amount", "0.00",
             "cardCode", cardCode,
             "cardType", cardType,
+            "dailyLimitMinutes", dailyLimitMinutes,
+            "dailyLimitText", dailyLimitText(dailyLimitMinutes),
             "expiresAt", expiry,
             "ownerUserId", ownerUserIdForCard(cardCode),
             "agencyUserId", ownerUserIdForCard(cardCode),
@@ -6454,6 +6595,8 @@ public class CourseApiController
                     "source", source,
                     "cardCode", cardCode,
                     "cardType", cardType,
+                    "dailyLimitMinutes", dailyLimitMinutes,
+                    "dailyLimitText", dailyLimitText(dailyLimitMinutes),
                     "orderId", order.get("id"),
                     "createdAt", time,
                     "activatedAt", time
@@ -6818,6 +6961,8 @@ public class CourseApiController
         boolean hasExpiry = course.containsKey("expiresAt") && expiresAt.length() > 0;
         boolean hasScore = course.containsKey("recentExamScore");
         String recentExamScore = str(course.get("recentExamScore")).trim();
+        boolean hasDailyLimit = course.containsKey("dailyLimitMinutes");
+        int dailyLimitMinutes = normalizeDailyLimit(course.get("dailyLimitMinutes"));
 
         Map<String, Object> enrollment = findEnrollment(userId, courseId, cardCode);
         Map<String, Object> order = latestOrderForUserCourse(userId, courseId, cardCode);
@@ -6859,6 +7004,24 @@ public class CourseApiController
             if (card != null)
             {
                 card.put("recentExamScore", recentExamScore);
+            }
+        }
+        if (hasDailyLimit)
+        {
+            if (enrollment != null)
+            {
+                enrollment.put("dailyLimitMinutes", dailyLimitMinutes);
+                enrollment.put("dailyLimitText", dailyLimitText(dailyLimitMinutes));
+            }
+            if (order != null)
+            {
+                order.put("dailyLimitMinutes", dailyLimitMinutes);
+                order.put("dailyLimitText", dailyLimitText(dailyLimitMinutes));
+            }
+            if (card != null)
+            {
+                card.put("dailyLimitMinutes", dailyLimitMinutes);
+                card.put("dailyLimitText", dailyLimitText(dailyLimitMinutes));
             }
         }
     }
@@ -7704,6 +7867,8 @@ public class CourseApiController
                 "cardType", firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType")),
                 "cardTypeText", cardTypeText(firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType"))),
                 "durationText", cardDurationText(firstNonBlank(enrollment.get("cardType"), order == null ? "" : order.get("cardType"))),
+                "dailyLimitMinutes", firstNonBlank(enrollment.get("dailyLimitMinutes"), order == null ? "" : order.get("dailyLimitMinutes")),
+                "dailyLimitText", firstNonBlank(enrollment.get("dailyLimitText"), order == null ? "" : order.get("dailyLimitText")),
                 "source", firstNonBlank(enrollment.get("source"), order == null ? "" : order.get("source")),
                 "studentName", firstNonBlank(enrollment.get("studentName"), order == null ? "" : order.get("studentName")),
                 "gender", firstNonBlank(enrollment.get("gender"), order == null ? "" : order.get("gender")),
@@ -8015,6 +8180,19 @@ public class CourseApiController
         return map("name", name, "score", score, "level", score >= 85 ? map("label", "优秀", "color", "purple") : score >= 75 ? map("label", "良好", "color", "green") : score >= 60 ? map("label", "中等", "color", "yellow") : map("label", "薄弱", "color", "red"));
     }
 
+    private static void syncCourseIntroFields(Map<String, Object> course)
+    {
+        if (course == null)
+        {
+            return;
+        }
+        String intro = firstNonBlank(course.get("introduction"), course.get("intro"), course.get("description"), course.get("sub"));
+        course.put("introduction", intro);
+        course.put("intro", intro);
+        course.put("description", intro);
+        course.put("sub", intro);
+    }
+
     private static void ensureCourseDefaults(Map<String, Object> course)
     {
         if (!course.containsKey("status"))
@@ -8162,6 +8340,12 @@ public class CourseApiController
         return result;
     }
 
+    private static String firstStableMediaUrl(Object value)
+    {
+        List<String> result = stableMediaUrlList(value);
+        return result.isEmpty() ? "" : result.get(0);
+    }
+
     private static List<String> commaList(String value)
     {
         List<String> result = new ArrayList<>();
@@ -8210,6 +8394,12 @@ public class CourseApiController
         {
             return 0;
         }
+    }
+
+    private static Object optionalScoreValue(Object value)
+    {
+        String text = str(value).trim();
+        return text.length() == 0 ? "" : intValue(value);
     }
 
     private static boolean boolValue(Object value, boolean fallback)

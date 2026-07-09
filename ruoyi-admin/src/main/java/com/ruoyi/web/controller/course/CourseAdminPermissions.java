@@ -91,7 +91,7 @@ public final class CourseAdminPermissions
         modules.add(module("users", "用户管理", "学员、机构账号与用户资料维护", 2060L, PERM_USERS_LIST, PERM_USERS_EDIT));
         modules.add(module("codes", "激活码管理", "激活码生成、分配、锁定和关闭授权", 2070L, PERM_CODES_LIST, PERM_CODES_ADD, PERM_CODES_EDIT, PERM_CODES_REMOVE, PERM_CODES_CLOSE));
         modules.add(module("agencies", "校区管理", "分机构统计、名额和明细查看", 2080L, PERM_AGENCIES_LIST, PERM_AGENCIES_EDIT));
-        modules.add(module("study", "后台记录查看", "后台操作记录、课时评价、AI 问答", 2090L, PERM_STUDY_LIST));
+        modules.add(module("study", "后台记录查看", "后台操作记录、意见反馈、AI 问答", 2090L, PERM_STUDY_LIST));
         modules.add(module("ratings", "课程打分统计", "正式课评分与评价统计", 2100L, PERM_RATINGS_LIST));
         modules.add(module("vocabulary", "外语词汇系统", "外语词汇预留模块", 2110L, PERM_VOCABULARY_VIEW));
         modules.add(module("subAccounts", "后台小号管理", "创建小号并授权可操作板块", 2120L,
