@@ -309,7 +309,15 @@ public class CourseApiController
             }
             user.put("phone", phone);
         }
-        putIfPresent(user, body, "avatar");
+        String avatar = str(body.get("avatar")).trim();
+        if (avatar.matches("(?i)^(blob:|file:|wxfile:|data:|https?://tmp).*$"))
+        {
+            return AjaxResult.error("请先上传头像图片");
+        }
+        if (avatar.length() > 0)
+        {
+            user.put("avatar", avatar);
+        }
         putIfPresent(user, body, "name");
         putIfPresent(user, body, "nickname");
         putIfPresent(user, body, "realName");
