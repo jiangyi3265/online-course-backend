@@ -1,8 +1,12 @@
 package com.ruoyi.web.controller.course;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -23,6 +27,10 @@ import javax.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -309,10 +317,15 @@ public class CourseApiController
             }
             user.put("phone", phone);
         }
-        String avatar = str(body.get("avatar")).trim();
-        if (avatar.matches("(?i)^(blob:|file:|wxfile:|data:|https?://tmp).*$"))
+        String rawAvatar = str(body.get("avatar")).trim();
+        if (rawAvatar.matches("(?i)^(blob:|file:|wxfile:|data:|https?://tmp).*$"))
         {
             return AjaxResult.error("请先上传头像图片");
+        }
+        String avatar = normalizeStableMediaUrl(rawAvatar);
+        if (rawAvatar.length() > 0 && avatar.length() == 0)
+        {
+            return AjaxResult.error("头像地址无效，请重新上传");
         }
         if (avatar.length() > 0)
         {
@@ -349,6 +362,7 @@ public class CourseApiController
         {
             return AjaxResult.error("请输入反馈内容");
         }
+        List<String> images = stableMediaUrlList(body.get("images"));
         Map<String, Object> feedback = map(
             "id", "feedback-" + System.currentTimeMillis(),
             "userId", user == null ? null : user.get("id"),
@@ -356,7 +370,9 @@ public class CourseApiController
             "phone", str(body.get("phone")).trim(),
             "wechat", str(body.get("wechat")).trim(),
             "content", content,
-            "images", stringList(body.get("images")),
+            "images", images,
+            "imageUrls", images,
+            "imageCount", images.size(),
             "status", "new",
             "createdAt", now()
         );
@@ -804,24 +820,73 @@ public class CourseApiController
         String lessonId = str(body.get("lessonId"));
         double duration = doubleValue(body.get("duration"));
         double currentTime = doubleValue(body.get("currentTime"));
-        int percent = Boolean.TRUE.equals(body.get("ended")) ? 100 : intValue(body.get("percent"));
+        double watchDelta = Math.max(0d, doubleValue(body.get("watchDelta")));
+        boolean ended = Boolean.TRUE.equals(body.get("ended"));
+        String key = progressKey(user, lessonId);
+        Map<String, Object> existing = lessonProgress.get(key);
+        if (duration <= 0d && existing != null)
+        {
+            duration = doubleValue(existing.get("duration"));
+        }
+        if (!ended && currentTime < 3d && watchDelta <= 0d)
+        {
+            return AjaxResult.success(existing == null
+                ? map("lessonId", lessonId, "recorded", false, "currentTime", currentTime)
+                : existing);
+        }
+        int percent = ended ? 100 : intValue(body.get("percent"));
         if (percent == 0 && duration > 0)
         {
             percent = Math.round((float) (currentTime / duration * 100));
         }
+        percent = Math.max(0, Math.min(100, percent));
+        int bestPercent = Math.max(existing == null ? 0 : progressBestPercent(existing), percent);
+        double totalWatchedSeconds = existing == null ? 0d : progressTotalWatchedSeconds(existing);
+        if (existing != null && !existing.containsKey("totalWatchedSeconds"))
+        {
+            double existingDuration = doubleValue(existing.get("duration"));
+            if (existingDuration > 0d)
+            {
+                totalWatchedSeconds = existingDuration * Math.max(0, Math.min(100, progressBestPercent(existing))) / 100d;
+            }
+        }
+        String progressEventId = str(body.get("progressEventId")).trim();
+        boolean duplicateEvent = existing != null && progressEventId.length() > 0
+            && progressEventId.equals(str(existing.get("lastProgressEventId")));
+        if (!duplicateEvent && watchDelta > 0d)
+        {
+            double safeDelta = duration > 0d ? Math.min(watchDelta, duration) : watchDelta;
+            totalWatchedSeconds += safeDelta;
+        }
+        if (watchDelta <= 0d && duration > 0d)
+        {
+            totalWatchedSeconds = Math.max(totalWatchedSeconds, duration * bestPercent / 100d);
+        }
+        totalWatchedSeconds = Math.max(0d, Math.round(totalWatchedSeconds * 1000d) / 1000d);
+        int cumulativePercent = duration > 0d
+            ? Math.max(0, Math.round((float) (totalWatchedSeconds / duration * 100d)))
+            : Math.max(existing == null ? 0 : intValue(existing.get("cumulativePercent")), bestPercent);
+        int completedCount = cumulativePercent / 100;
         Map<String, Object> progress = map(
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
             "lessonTitle", body.get("lessonTitle") == null ? lessonId : body.get("lessonTitle"),
+            "sourceLessonTitle", body.get("sourceLessonTitle") == null ? lessonId : body.get("sourceLessonTitle"),
             "courseId", body.get("courseId"),
             "courseTitle", body.get("courseTitle"),
             "currentTime", currentTime,
             "duration", duration,
             "percent", percent,
-            "ended", Boolean.TRUE.equals(body.get("ended")),
+            "bestPercent", bestPercent,
+            "cumulativePercent", cumulativePercent,
+            "totalWatchedSeconds", totalWatchedSeconds,
+            "completedCount", completedCount,
+            "ended", ended,
+            "progressSessionId", body.get("progressSessionId"),
+            "lastProgressEventId", progressEventId,
             "updatedAt", now()
         );
-        lessonProgress.put(progressKey(user, lessonId), progress);
+        lessonProgress.put(key, progress);
         persistData();
         return AjaxResult.success(progress);
     }
@@ -844,7 +909,7 @@ public class CourseApiController
             return AjaxResult.error("请先登录后再评分");
         }
         Map<String, Object> progress = lessonProgress.get(progressKey(user, lessonId));
-        if (progress == null || intValue(progress.get("percent")) < 90)
+        if (progress == null || progressBestPercent(progress) < 90)
         {
             return AjaxResult.error("学习进度达到90%后才可以评分");
         }
@@ -929,6 +994,52 @@ public class CourseApiController
         {
             return AjaxResult.error(e.getMessage());
         }
+    }
+
+    @GetMapping("/app/media")
+    public ResponseEntity<InputStreamResource> appMedia(@RequestParam String path,
+                                                         @RequestParam(required = false, defaultValue = "0") String download)
+        throws IOException
+    {
+        String requested = str(path).trim().replace('\\', '/');
+        int queryIndex = requested.indexOf('?');
+        if (queryIndex >= 0)
+        {
+            requested = requested.substring(0, queryIndex);
+        }
+        if (!requested.matches("^/(profile|avatar|upload|uploads)/.+"))
+        {
+            return ResponseEntity.notFound().build();
+        }
+        String relative = requested.startsWith("/profile/") ? requested.substring("/profile/".length()) : requested.substring(1);
+        File root = new File(firstNonBlank(profilePath, RuoYiConfig.getProfile())).getCanonicalFile();
+        File target = new File(root, relative).getCanonicalFile();
+        String rootPrefix = root.getPath().endsWith(File.separator) ? root.getPath() : root.getPath() + File.separator;
+        if (!target.getPath().startsWith(rootPrefix) || !target.isFile())
+        {
+            return ResponseEntity.notFound().build();
+        }
+
+        String contentType = Files.probeContentType(target.toPath());
+        MediaType mediaType;
+        try
+        {
+            mediaType = contentType == null ? MediaType.APPLICATION_OCTET_STREAM : MediaType.parseMediaType(contentType);
+        }
+        catch (Exception e)
+        {
+            mediaType = MediaType.APPLICATION_OCTET_STREAM;
+        }
+        String disposition = ("1".equals(download) || "true".equalsIgnoreCase(download)) ? "attachment" : "inline";
+        String encodedName = URLEncoder.encode(target.getName(), StandardCharsets.UTF_8.name()).replace("+", "%20");
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(mediaType);
+        headers.setContentLength(target.length());
+        headers.set(HttpHeaders.CONTENT_DISPOSITION, disposition + "; filename*=UTF-8''" + encodedName);
+        headers.setCacheControl("public, max-age=31536000, immutable");
+        return ResponseEntity.ok()
+            .headers(headers)
+            .body(new InputStreamResource(new FileInputStream(target)));
     }
 
     @PostMapping("/app/practice/submit")
@@ -1171,7 +1282,11 @@ public class CourseApiController
             return AjaxResult.error("请先登录");
         }
         String type = str(body.get("type"));
-        String targetId = str(body.get("targetId"));
+        String targetId = firstNonBlank(body.get("targetId"), body.get("questionId"), body.get("id"));
+        if ("question".equals(type))
+        {
+            targetId = resolveFavoriteQuestionTargetId(targetId);
+        }
         if (type.length() == 0 || targetId.length() == 0)
         {
             return AjaxResult.error("收藏参数不完整");
@@ -1209,6 +1324,34 @@ public class CourseApiController
         return AjaxResult.success(map("favorited", true, "favorite", favorite));
     }
 
+    private static String resolveFavoriteQuestionTargetId(String value)
+    {
+        String targetId = str(value).trim();
+        if (targetId.length() == 0 || findById(questions, targetId) != null)
+        {
+            return targetId;
+        }
+        Map<String, Object> wrong = findById(wrongQuestions, targetId);
+        if (wrong == null)
+        {
+            return targetId;
+        }
+        String questionId = str(wrong.get("questionId")).trim();
+        if (questionId.length() > 0)
+        {
+            return questionId;
+        }
+        String questionKey = ensureWrongQuestionKey(wrong);
+        for (Map<String, Object> question : questions)
+        {
+            if (questionKey.equals(questionFingerprint(question)))
+            {
+                return str(question.get("id"));
+            }
+        }
+        return targetId;
+    }
+
     @PostMapping("/app/favorites/question/answer")
     public AjaxResult answerFavoriteQuestion(@RequestBody Map<String, Object> body, HttpServletRequest request)
     {
@@ -1241,7 +1384,7 @@ public class CourseApiController
             "manualReviewCount", manualReview ? 1 : 0,
             "score", correct ? 100 : 0,
             "createdAt", now(),
-            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "stemAudioUrl", question.get("stemAudioUrl"), "stemFileUrl", question.get("stemFileUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question)))
+            "details", list(map("id", questionId, "stem", question.get("stem"), "stemImageUrl", question.get("stemImageUrl"), "stemAudioUrl", question.get("stemAudioUrl"), "stemFileUrl", question.get("stemFileUrl"), "optionImageUrls", question.get("optionImageUrls"), "questionType", questionType, "selected", isChoiceQuestion(question) ? selected : selectedText, "selectedText", selectedText, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", question.get("answerImageUrl"), "answerImageUrls", firstMediaUrlList(question.get("answerImageUrls"), question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "correct", correct, "manualReview", manualReview, "selfReviewed", !manualReview, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisImageUrls", firstMediaUrlList(question.get("analysisImageUrls"), question.get("analysisImageUrl"), question.get("imageAnalysisUrl"), question.get("explainImageUrl")), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question)))
         );
         attempts.add(attempt);
         if (!correct && !manualReview)
@@ -1262,11 +1405,13 @@ public class CourseApiController
                 "answer", question.get("answer"),
                 "answerText", answerText,
                 "answerImageUrl", question.get("answerImageUrl"),
+                "answerImageUrls", firstMediaUrlList(question.get("answerImageUrls"), question.get("answerImageUrl")),
                 "answerFileUrl", question.get("answerFileUrl"),
                 "selected", selected,
                 "selectedText", selectedText,
                 "analysis", question.get("analysis"),
                 "analysisImageUrl", analysisImageUrl(question),
+                "analysisImageUrls", firstMediaUrlList(question.get("analysisImageUrls"), question.get("analysisImageUrl"), question.get("imageAnalysisUrl"), question.get("explainImageUrl")),
                 "analysisFileUrl", question.get("analysisFileUrl"),
                 "videoAnalysisUrl", analysisVideoUrl(question),
                 "knowledge", question.get("knowledge"),
@@ -1275,7 +1420,7 @@ public class CourseApiController
             ), user);
         }
         persistData();
-        return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", str(question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
+        return AjaxResult.success(map("correct", correct, "manualReview", manualReview, "questionType", questionType, "answer", isChoiceQuestion(question) ? question.get("answer") : answerText, "answerText", answerText, "answerImageUrl", question.get("answerImageUrl"), "answerImageUrls", firstMediaUrlList(question.get("answerImageUrls"), question.get("answerImageUrl")), "answerFileUrl", str(question.get("answerFileUrl")), "selectedText", selectedText, "analysis", question.get("analysis"), "analysisImageUrl", analysisImageUrl(question), "analysisImageUrls", firstMediaUrlList(question.get("analysisImageUrls"), question.get("analysisImageUrl"), question.get("imageAnalysisUrl"), question.get("explainImageUrl")), "analysisFileUrl", question.get("analysisFileUrl"), "videoAnalysisUrl", analysisVideoUrl(question), "attempt", attempt));
     }
 
     private static boolean isDocumentFavoriteType(String type)
@@ -1336,7 +1481,9 @@ public class CourseApiController
                 if (student != null)
                 {
                     Map<String, Object> item = publicUser(student);
-                    item.put("learning", studentLearningSnapshot(studentUserId));
+                    Map<String, Object> learning = studentLearningSnapshot(studentUserId);
+                    item.put("learning", learning);
+                    item.put("lastStudyAt", learning.get("lastStudyAt"));
                     item.putAll(studentCourseSummary(studentUserId));
                     item.put("bindingId", binding.get("id"));
                     item.put("bindingCreatedAt", binding.get("createdAt"));
@@ -1359,7 +1506,9 @@ public class CourseApiController
             if (str(user.get("id")).equals(str(student.get("referrerUserId"))))
             {
                 Map<String, Object> item = publicUser(student);
-                item.put("learning", studentLearningSnapshot(studentUserId));
+                Map<String, Object> learning = studentLearningSnapshot(studentUserId);
+                item.put("learning", learning);
+                item.put("lastStudyAt", learning.get("lastStudyAt"));
                 item.putAll(studentCourseSummary(studentUserId));
                 item.put("bindingId", "referrer-" + studentUserId);
                 item.put("bindingCreatedAt", student.get("referrerBoundAt"));
@@ -1382,7 +1531,8 @@ public class CourseApiController
                     {
                         continue;
                     }
-                    Map<String, Object> item = map("id", studentUserId, "name", order.get("studentName"), "phone", "", "grade", order.get("grade"), "region", order.get("region"), "learning", studentLearningSnapshot(studentUserId));
+                    Map<String, Object> learning = studentLearningSnapshot(studentUserId);
+                    Map<String, Object> item = map("id", studentUserId, "name", order.get("studentName"), "phone", "", "grade", order.get("grade"), "region", order.get("region"), "learning", learning, "lastStudyAt", learning.get("lastStudyAt"));
                     item.putAll(studentCourseSummary(studentUserId));
                     item.put("bindingId", "");
                     item.put("bindingCreatedAt", order.get("createdAt"));
@@ -2407,7 +2557,7 @@ public class CourseApiController
             "lessonRatings", lessonRatings,
             "aiChats", aiChats,
             "operationLogs", operationLogs,
-            "feedbacks", feedbacks,
+            "feedbacks", normalizedFeedbacks(),
             "reinforcePoints", reinforcePoints,
             "studyPlans", studyPlans
         ));
@@ -3223,8 +3373,110 @@ public class CourseApiController
         result.put("description", intro);
         result.put("available", hasActiveEnrollment(user, scopedCourseId(result.get("id"))));
         applyComputedCourseStats(result, user);
+        applyLessonProgressToCourse(result, user);
         applyAttemptStatusToCourse(result, user);
         return result;
+    }
+
+    private static void applyLessonProgressToCourse(Map<String, Object> course, Map<String, Object> user)
+    {
+        if (user == null)
+        {
+            return;
+        }
+        String courseId = scopedCourseId(course.get("id"));
+        for (Map<String, Object> version : mapList(course.get("versions")))
+        {
+            applyLessonProgressToChapters(mapList(version.get("chapters")), user, courseId);
+        }
+        applyLessonProgressToChapters(mapList(course.get("chapters")), user, courseId);
+    }
+
+    private static void applyLessonProgressToChapters(List<Map<String, Object>> chapters, Map<String, Object> user, String courseId)
+    {
+        for (Map<String, Object> chapter : chapters)
+        {
+            List<Map<String, Object>> lessons = mapList(chapter.get("items"));
+            if (lessons.isEmpty())
+            {
+                lessons = mapList(chapter.get("children"));
+            }
+            for (Map<String, Object> lesson : lessons)
+            {
+                String lessonTitle = firstNonBlank(lesson.get("lessonTitle"), lesson.get("title"), lesson.get("name"));
+                List<Map<String, Object>> children = mapList(lesson.get("children"));
+                if (children.isEmpty())
+                {
+                    applyLessonProgressToItem(lesson, user, courseId, lessonTitle);
+                    continue;
+                }
+                for (Map<String, Object> child : children)
+                {
+                    if (intValue(child.get("type")) != 2)
+                    {
+                        applyLessonProgressToItem(child, user, courseId, firstNonBlank(lessonTitle, child.get("lessonTitle"), child.get("name")));
+                    }
+                }
+            }
+        }
+    }
+
+    private static void applyLessonProgressToItem(Map<String, Object> item, Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        if (intValue(item.get("type")) == 2)
+        {
+            return;
+        }
+        Map<String, Object> progress = findLessonProgress(user, courseId, lessonTitle);
+        if (progress == null)
+        {
+            item.put("cumulativePercent", 0);
+            item.put("studyPercent", 0);
+            item.put("completedCount", 0);
+            item.put("read", 0);
+            return;
+        }
+        int cumulativePercent = progressCumulativePercent(progress);
+        item.put("cumulativePercent", cumulativePercent);
+        item.put("studyPercent", cumulativePercent);
+        item.put("bestPercent", progressBestPercent(progress));
+        item.put("completedCount", cumulativePercent / 100);
+        item.put("totalWatchedSeconds", progressTotalWatchedSeconds(progress));
+        double total = Math.max(1d, doubleValue(item.get("total")));
+        item.put("read", Math.round(total * cumulativePercent) / 100d);
+    }
+
+    private static Map<String, Object> findLessonProgress(Map<String, Object> user, String courseId, String lessonTitle)
+    {
+        String title = str(lessonTitle).trim();
+        if (title.length() == 0)
+        {
+            return null;
+        }
+        Map<String, Object> exact = lessonProgress.get(progressKey(user, title));
+        if (exact != null)
+        {
+            return exact;
+        }
+        String normalized = normalizedLessonTitle(title);
+        for (Map<String, Object> progress : lessonProgress.values())
+        {
+            if (!sameUser(progress, user))
+            {
+                continue;
+            }
+            String progressCourseId = scopedCourseId(progress.get("courseId"));
+            if (courseId.length() > 0 && progressCourseId.length() > 0 && !courseId.equals(progressCourseId))
+            {
+                continue;
+            }
+            String progressTitle = normalizedLessonTitle(firstNonBlank(progress.get("sourceLessonTitle"), progress.get("lessonId"), progress.get("lessonTitle")));
+            if (normalized.equals(progressTitle))
+            {
+                return progress;
+            }
+        }
+        return null;
     }
 
     private static void applyAttemptStatusToCourse(Map<String, Object> course, Map<String, Object> user)
@@ -3638,13 +3890,13 @@ public class CourseApiController
             {
                 continue;
             }
-            String title = normalizedLessonTitle(firstNonBlank(progress.get("lessonTitle"), progress.get("sourceLessonTitle"), progress.get("title")));
+            String title = normalizedLessonTitle(firstNonBlank(progress.get("sourceLessonTitle"), progress.get("lessonId"), progress.get("lessonTitle"), progress.get("title")));
             if (!lessonTitles.isEmpty() && !lessonTitles.contains(title))
             {
                 continue;
             }
-            seconds += (int) Math.round(doubleValue(progress.get("currentTime")));
-            if (Boolean.TRUE.equals(progress.get("ended")) || intValue(progress.get("percent")) >= 90)
+            seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
+            if (progressBestPercent(progress) >= 90)
             {
                 learned++;
             }
@@ -3680,8 +3932,8 @@ public class CourseApiController
             {
                 continue;
             }
-            seconds += (int) Math.round(doubleValue(progress.get("currentTime")));
-            if (Boolean.TRUE.equals(progress.get("ended")) || intValue(progress.get("percent")) >= 90)
+            seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
+            if (progressBestPercent(progress) >= 90)
             {
                 learned++;
             }
@@ -3831,7 +4083,7 @@ public class CourseApiController
                 "type", type,
                 "sourceType", sourceLabel(type),
                 "stem", wrongStemText(q),
-                "stemImageUrl", firstNonBlank(q.get("stemImageUrl"), q.get("parentStemImageUrl")),
+                "stemImageUrl", firstMediaUrl(q.get("stemImageUrls"), q.get("stemImageUrl"), q.get("parentStemImageUrl")),
                 "stemAudioUrl", firstNonBlank(q.get("stemAudioUrl"), q.get("parentStemAudioUrl")),
                 "stemFileUrl", firstNonBlank(q.get("stemFileUrl"), q.get("parentStemFileUrl")),
                 "options", q.get("options"),
@@ -3839,6 +4091,7 @@ public class CourseApiController
                 "answer", q.get("answer"),
                 "answerText", answerText,
                 "answerImageUrl", q.get("answerImageUrl"),
+                "answerImageUrls", firstMediaUrlList(q.get("answerImageUrls"), q.get("answerImageUrl")),
                 "answerFileUrl", q.get("answerFileUrl"),
                 "selected", selected,
                 "selectedText", selectedText,
@@ -3851,6 +4104,7 @@ public class CourseApiController
                 "partialCredit", partial ? 0.5d : (ok ? 1d : 0d),
                 "analysis", q.get("analysis"),
                 "analysisImageUrl", analysisImageUrl(q),
+                "analysisImageUrls", firstMediaUrlList(q.get("analysisImageUrls"), q.get("analysisImageUrl"), q.get("imageAnalysisUrl"), q.get("explainImageUrl")),
                 "analysisFileUrl", q.get("analysisFileUrl"),
                 "videoAnalysisUrl", analysisVideoUrl(q),
                 "knowledge", q.get("knowledge"),
@@ -3878,7 +4132,8 @@ public class CourseApiController
             "selected", isChoiceQuestion(q) ? selected : selectedText,
             "answer", isChoiceQuestion(q) ? q.get("answer") : answerText,
             "answerText", isChoiceQuestion(q) ? optionText(q, intValue(q.get("answer"))) : answerText,
-            "answerImageUrl", str(q.get("answerImageUrl")),
+            "answerImageUrl", q.get("answerImageUrl"),
+            "answerImageUrls", firstMediaUrlList(q.get("answerImageUrls"), q.get("answerImageUrl")),
             "answerFileUrl", str(q.get("answerFileUrl")),
             "studentAnswerImageUrl", studentAnswerImageUrl,
             "studentAnswerImages", studentAnswerImages,
@@ -3892,6 +4147,7 @@ public class CourseApiController
             "noUpload", noUpload,
             "analysis", q.get("analysis"),
             "analysisImageUrl", analysisImageUrl(q),
+            "analysisImageUrls", firstMediaUrlList(q.get("analysisImageUrls"), q.get("analysisImageUrl"), q.get("imageAnalysisUrl"), q.get("explainImageUrl")),
             "analysisFileUrl", q.get("analysisFileUrl"),
             "videoAnalysisUrl", analysisVideoUrl(q),
             "sourceWrongId", sourceWrongId,
@@ -4104,8 +4360,10 @@ public class CourseApiController
             item.put("manualReview", manualReview);
             if (manualReview)
             {
+                List<String> answerImageUrls = firstMediaUrlList(q.get("answerImageUrls"), q.get("answerImageUrl"));
                 item.put("answerText", correctAnswerText(q));
-                item.put("answerImageUrl", str(q.get("answerImageUrl")));
+                item.put("answerImageUrl", answerImageUrls);
+                item.put("answerImageUrls", answerImageUrls);
                 item.put("answerFileUrl", str(q.get("answerFileUrl")));
             }
             list.add(item);
@@ -4121,10 +4379,11 @@ public class CourseApiController
         {
             question.put("difficulty", 1);
         }
-        String stemImageUrl = firstNonBlank(question.get("stemImageUrl"), question.get("questionImageUrl"), question.get("stemImage"));
-        if (stemImageUrl.length() > 0)
+        List<String> stemImageUrls = firstMediaUrlList(question.get("stemImageUrls"), question.get("stemImageUrl"), question.get("questionImageUrl"), question.get("stemImage"));
+        if (!stemImageUrls.isEmpty())
         {
-            question.put("stemImageUrl", stemImageUrl);
+            question.put("stemImageUrl", stemImageUrls);
+            question.put("stemImageUrls", stemImageUrls);
         }
         String stemAudioUrl = firstNonBlank(question.get("stemAudioUrl"), question.get("questionAudioUrl"), question.get("audioUrl"), question.get("stemAudio"));
         if (stemAudioUrl.length() > 0)
@@ -4146,10 +4405,11 @@ public class CourseApiController
             optionImageUrls = mediaUrlList(question.get("optionImageUrl"));
         }
         question.put("optionImageUrls", optionImageUrls);
-        String imageUrl = analysisImageUrl(question);
-        if (imageUrl.length() > 0)
+        List<String> analysisImageUrls = firstMediaUrlList(question.get("analysisImageUrls"), question.get("analysisImageUrl"), question.get("imageAnalysisUrl"), question.get("explainImageUrl"));
+        if (!analysisImageUrls.isEmpty())
         {
-            question.put("analysisImageUrl", imageUrl);
+            question.put("analysisImageUrl", analysisImageUrls);
+            question.put("analysisImageUrls", analysisImageUrls);
         }
         String analysisFileUrl = firstNonBlank(question.get("analysisFileUrl"), question.get("explainFileUrl"), question.get("analysisDocUrl"));
         if (analysisFileUrl.length() > 0)
@@ -4161,10 +4421,11 @@ public class CourseApiController
         {
             question.put("videoAnalysisUrl", videoUrl);
         }
-        String answerImageUrl = str(question.get("answerImageUrl")).trim();
-        if (answerImageUrl.length() > 0)
+        List<String> answerImageUrls = firstMediaUrlList(question.get("answerImageUrls"), question.get("answerImageUrl"));
+        if (!answerImageUrls.isEmpty())
         {
-            question.put("answerImageUrl", answerImageUrl);
+            question.put("answerImageUrl", answerImageUrls);
+            question.put("answerImageUrls", answerImageUrls);
         }
         String answerFileUrl = firstNonBlank(question.get("answerFileUrl"), question.get("answerDocUrl"), question.get("answerDocumentUrl"));
         if (answerFileUrl.length() > 0)
@@ -4221,8 +4482,14 @@ public class CourseApiController
             sub.put("id", firstNonBlank(sub.get("subQuestionId"), sub.get("rawId"), sub.get("id"), "sub-" + (index + 1)));
             sub.put("questionType", type);
             sub.put("stem", firstNonBlank(sub.get("stem"), sub.get("question")));
-            List<String> optionImageUrls = mediaUrlList(sub.get("optionImageUrls"));
+            List<String> stemImageUrls = firstMediaUrlList(sub.get("stemImageUrls"), sub.get("stemImageUrl"), sub.get("questionImageUrl"), sub.get("stemImage"));
+            sub.put("stemImageUrl", stemImageUrls);
+            sub.put("stemImageUrls", stemImageUrls);
+            List<String> optionImageUrls = firstMediaUrlList(sub.get("optionImageUrls"), sub.get("optionImages"), sub.get("optionImageUrl"));
             sub.put("optionImageUrls", optionImageUrls);
+            List<String> answerImageUrls = firstMediaUrlList(sub.get("answerImageUrls"), sub.get("answerImageUrl"));
+            sub.put("answerImageUrl", answerImageUrls);
+            sub.put("answerImageUrls", answerImageUrls);
             if ("choice".equals(type))
             {
                 if (!(sub.get("options") instanceof List))
@@ -4273,8 +4540,10 @@ public class CourseApiController
             item.put("manualReview", manualReview);
             if (manualReview)
             {
+                List<String> answerImageUrls = firstMediaUrlList(source.get("answerImageUrls"), source.get("answerImageUrl"));
                 item.put("answerText", correctAnswerText(source));
-                item.put("answerImageUrl", str(source.get("answerImageUrl")));
+                item.put("answerImageUrl", answerImageUrls);
+                item.put("answerImageUrls", answerImageUrls);
                 item.put("answerFileUrl", str(source.get("answerFileUrl")));
             }
             result.add(item);
@@ -4444,7 +4713,7 @@ public class CourseApiController
             "type", attempt.get("type"),
             "sourceType", attempt.get("sourceType"),
             "stem", wrongStemText(detail),
-            "stemImageUrl", firstNonBlank(detail.get("stemImageUrl"), detail.get("parentStemImageUrl")),
+            "stemImageUrl", firstMediaUrl(detail.get("stemImageUrls"), detail.get("stemImageUrl"), detail.get("parentStemImageUrl")),
             "stemAudioUrl", firstNonBlank(detail.get("stemAudioUrl"), detail.get("parentStemAudioUrl")),
             "stemFileUrl", firstNonBlank(detail.get("stemFileUrl"), detail.get("parentStemFileUrl")),
             "options", question == null ? detail.get("options") : question.get("options"),
@@ -4452,6 +4721,7 @@ public class CourseApiController
             "answer", detail.get("answer"),
             "answerText", detail.get("answerText"),
             "answerImageUrl", detail.get("answerImageUrl"),
+            "answerImageUrls", firstMediaUrlList(detail.get("answerImageUrls"), detail.get("answerImageUrl")),
             "answerFileUrl", detail.get("answerFileUrl"),
             "selected", detail.get("selected"),
             "selectedText", detail.get("selectedText"),
@@ -4782,16 +5052,7 @@ public class CourseApiController
         {
             return "";
         }
-        String url = str(question.get("analysisImageUrl")).trim();
-        if (url.length() == 0)
-        {
-            url = str(question.get("imageAnalysisUrl")).trim();
-        }
-        if (url.length() == 0)
-        {
-            url = str(question.get("explainImageUrl")).trim();
-        }
-        return url;
+        return firstMediaUrl(question.get("analysisImageUrls"), question.get("analysisImageUrl"), question.get("imageAnalysisUrl"), question.get("explainImageUrl"));
     }
 
     private static List<Map<String, Object>> wrongbookItems(List<Map<String, Object>> source, String sourceFilter)
@@ -5062,6 +5323,7 @@ public class CourseApiController
                     ? stableMediaUrlList(detail.get("studentAnswerImageUrl"))
                     : stableMediaUrlList(detail.get("answerImages")),
                 "answerImageUrl", detail.get("answerImageUrl"),
+                "answerImageUrls", firstMediaUrlList(detail.get("answerImageUrls"), detail.get("answerImageUrl")),
                 "answerFileUrl", detail.get("answerFileUrl"),
                 "reviewResult", detail.get("reviewResult"),
                 "reviewResultText", reviewResultText(detail.get("reviewResult")),
@@ -5359,12 +5621,17 @@ public class CourseApiController
             {
                 continue;
             }
-            String progressCourseId = str(progress.get("courseId"));
-            if (courseId.length() > 0 && progressCourseId.length() > 0 && !courseId.equals(progressCourseId))
+            String progressCourseId = scopedCourseId(progress.get("courseId"));
+            String expectedCourseId = scopedCourseId(courseId);
+            if (expectedCourseId.length() > 0 && progressCourseId.length() > 0 && !expectedCourseId.equals(progressCourseId))
             {
                 continue;
             }
-            int seconds = (int) Math.round(doubleValue(progress.get("currentTime")));
+            int seconds = (int) Math.round(progressTotalWatchedSeconds(progress));
+            if (seconds < 3)
+            {
+                continue;
+            }
             totalSeconds += seconds;
             LocalDate day = datePart(str(progress.get("updatedAt")));
             if (day != null)
@@ -5403,7 +5670,7 @@ public class CourseApiController
             "weekText", secondsText(weekSeconds),
             "days", days.size(),
             "checkinDays", checkinDays.size(),
-            "records", learningRecords(user)
+            "records", learningRecords(user, courseId)
         );
     }
 
@@ -5412,19 +5679,38 @@ public class CourseApiController
         return str(learningStats(user, courseId).get("totalText"));
     }
 
-    private static List<Map<String, Object>> learningRecords(Map<String, Object> user)
+    private static List<Map<String, Object>> learningRecords(Map<String, Object> user, String courseId)
     {
         List<Map<String, Object>> result = new ArrayList<>();
+        String expectedCourseId = scopedCourseId(courseId);
         for (Map<String, Object> progress : lessonProgress.values())
         {
-            if (sameUser(progress, user))
+            if (!sameUser(progress, user))
             {
-                result.add(map(
-                    "lessonTitle", progress.get("lessonTitle"),
-                    "duration", secondsText((int) Math.round(doubleValue(progress.get("currentTime")))),
-                    "updatedAt", progress.get("updatedAt")
-                ));
+                continue;
             }
+            String progressCourseId = scopedCourseId(progress.get("courseId"));
+            if (expectedCourseId.length() > 0 && progressCourseId.length() > 0 && !expectedCourseId.equals(progressCourseId))
+            {
+                continue;
+            }
+            int durationSeconds = (int) Math.round(progressTotalWatchedSeconds(progress));
+            if (durationSeconds < 3)
+            {
+                continue;
+            }
+            result.add(map(
+                "id", progress.get("lessonId"),
+                "lessonTitle", progress.get("lessonTitle"),
+                "courseId", progress.get("courseId"),
+                "duration", durationSeconds,
+                "durationSeconds", durationSeconds,
+                "durationText", secondsText(durationSeconds),
+                "bestPercent", progressBestPercent(progress),
+                "cumulativePercent", progressCumulativePercent(progress),
+                "completedCount", progressCumulativePercent(progress) / 100,
+                "updatedAt", progress.get("updatedAt")
+            ));
         }
         result.sort((a, b) -> str(b.get("updatedAt")).compareTo(str(a.get("updatedAt"))));
         return result.size() > 20 ? result.subList(0, 20) : result;
@@ -5503,6 +5789,24 @@ public class CourseApiController
         row.put("studentId", firstNonBlank(item.get("studentId"), item.get("userId")));
         row.put("date", firstNonBlank(item.get("date"), str(item.get("createdAt")).length() >= 10 ? str(item.get("createdAt")).substring(0, 10) : ""));
         return row;
+    }
+
+    private static List<Map<String, Object>> normalizedFeedbacks()
+    {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> feedback : feedbacks)
+        {
+            Map<String, Object> row = new LinkedHashMap<>(feedback);
+            List<String> images = stableMediaUrlList(feedback.get("images"));
+            if (images.isEmpty()) images = stableMediaUrlList(feedback.get("imageUrls"));
+            if (images.isEmpty()) images = stableMediaUrlList(feedback.get("photos"));
+            if (images.isEmpty()) images = stableMediaUrlList(feedback.get("imageUrl"));
+            row.put("images", images);
+            row.put("imageUrls", images);
+            row.put("imageCount", images.size());
+            rows.add(row);
+        }
+        return rows;
     }
 
     private static boolean canViewStudent(Map<String, Object> requester, String studentUserId)
@@ -6010,6 +6314,7 @@ public class CourseApiController
             }
         }
         int progress = averageProgressForUser(userId);
+        String lastStudyAt = latestStudyAtForUser(userId);
         return map(
             "courseCount", openCourses,
             "attemptCount", userAttempts.size(),
@@ -6017,8 +6322,54 @@ public class CourseApiController
             "studyTime", studyDurationText(user, ""),
             "ratingCount", ratingCount,
             "wrongCount", wrongCount,
+            "lastStudyAt", lastStudyAt,
+            "latestStudyAt", lastStudyAt,
             "progressText", progress > 0 ? progress + "%" : "暂无"
         );
+    }
+
+    private static String latestStudyAtForUser(String userId)
+    {
+        String latest = "";
+        for (Map<String, Object> progress : lessonProgress.values())
+        {
+            if (userId.equals(str(progress.get("userId"))))
+            {
+                latest = laterStudyTime(latest, progress.get("updatedAt"));
+            }
+        }
+        for (Map<String, Object> attempt : attempts)
+        {
+            if (userId.equals(str(attempt.get("userId"))))
+            {
+                latest = laterStudyTime(latest, firstNonBlank(attempt.get("updatedAt"), attempt.get("submittedAt"), attempt.get("completedAt"), attempt.get("createdAt")));
+            }
+        }
+        for (Map<String, Object> checkin : studyCheckins)
+        {
+            if (userId.equals(firstNonBlank(checkin.get("studentId"), checkin.get("userId"))))
+            {
+                latest = laterStudyTime(latest, firstNonBlank(checkin.get("updatedAt"), checkin.get("createdAt"), checkin.get("date")));
+            }
+        }
+        for (Map<String, Object> rating : lessonRatings)
+        {
+            if (userId.equals(str(rating.get("userId"))))
+            {
+                latest = laterStudyTime(latest, firstNonBlank(rating.get("updatedAt"), rating.get("createdAt")));
+            }
+        }
+        return latest;
+    }
+
+    private static String laterStudyTime(String current, Object value)
+    {
+        String candidate = str(value).trim();
+        if (candidate.length() == 0)
+        {
+            return str(current);
+        }
+        return str(current).length() == 0 || candidate.compareTo(str(current)) > 0 ? candidate : str(current);
     }
 
     @SuppressWarnings("unchecked")
@@ -7209,7 +7560,7 @@ public class CourseApiController
     private static boolean lessonVideoDone(Map<String, Object> user, String lessonTitle)
     {
         Map<String, Object> progress = lessonProgress.get(progressKey(user, lessonTitle));
-        return progress != null && intValue(progress.get("percent")) >= LESSON_UNLOCK_PERCENT;
+        return progress != null && progressBestPercent(progress) >= LESSON_UNLOCK_PERCENT;
     }
 
     // 本节配套练习是否完成：存在一条该课程、该课时（practiceTitle 或 title 命中）的练习/巩固记录即视为完成
@@ -7559,6 +7910,8 @@ public class CourseApiController
     {
         Map<String, Object> item = new LinkedHashMap<>(user);
         item.remove("password");
+        String avatar = normalizeStableMediaUrl(item.get("avatar"));
+        item.put("avatar", avatar);
         String userId = str(user.get("id"));
         Map<String, Object> latestOrder = latestOpenOrderForUser(userId);
         Map<String, Object> latestEnrollment = latestEnrollmentForUser(userId);
@@ -7918,7 +8271,7 @@ public class CourseApiController
         {
             if (userId.equals(str(progress.get("userId"))))
             {
-                total += intValue(progress.get("percent"));
+                total += progressBestPercent(progress);
                 count++;
             }
         }
@@ -7933,7 +8286,7 @@ public class CourseApiController
         {
             if (userId.equals(str(progress.get("userId"))) && courseId.equals(str(progress.get("courseId"))))
             {
-                total += intValue(progress.get("percent"));
+                total += progressBestPercent(progress);
                 count++;
             }
         }
@@ -8149,6 +8502,54 @@ public class CourseApiController
         return (user == null ? "guest" : str(user.get("id"))) + ":" + lessonId;
     }
 
+    private static int progressBestPercent(Map<String, Object> progress)
+    {
+        if (progress == null)
+        {
+            return 0;
+        }
+        int best = progress.containsKey("bestPercent")
+            ? intValue(progress.get("bestPercent"))
+            : intValue(progress.get("percent"));
+        return Math.max(0, Math.min(100, best));
+    }
+
+    private static double progressTotalWatchedSeconds(Map<String, Object> progress)
+    {
+        if (progress == null)
+        {
+            return 0d;
+        }
+        if (progress.containsKey("totalWatchedSeconds"))
+        {
+            return Math.max(0d, doubleValue(progress.get("totalWatchedSeconds")));
+        }
+        double duration = doubleValue(progress.get("duration"));
+        if (duration > 0d)
+        {
+            return duration * progressBestPercent(progress) / 100d;
+        }
+        return Math.max(0d, doubleValue(progress.get("currentTime")));
+    }
+
+    private static int progressCumulativePercent(Map<String, Object> progress)
+    {
+        if (progress == null)
+        {
+            return 0;
+        }
+        if (progress.containsKey("cumulativePercent"))
+        {
+            return Math.max(0, intValue(progress.get("cumulativePercent")));
+        }
+        double duration = doubleValue(progress.get("duration"));
+        if (duration > 0d)
+        {
+            return Math.max(0, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d)));
+        }
+        return progressBestPercent(progress);
+    }
+
     private static int findRating(String lessonId, Map<String, Object> user)
     {
         for (int i = lessonRatings.size() - 1; i >= 0; i--)
@@ -8314,17 +8715,36 @@ public class CourseApiController
         {
             for (Object item : (List<Object>) value)
             {
-                String text = str(item).trim();
-                if (text.length() > 0)
+                for (String nested : mediaUrlList(item))
                 {
-                    result.add(text);
+                    if (!result.contains(nested))
+                    {
+                        result.add(nested);
+                    }
                 }
             }
             return result;
         }
-        for (String item : str(value).split("[,\\n]"))
+        if (value instanceof Map)
         {
-            String text = item.trim();
+            Map<String, Object> item = (Map<String, Object>) value;
+            return mediaUrlList(firstNonBlank(item.get("url"), item.get("fileName"), item.get("path"), item.get("src")));
+        }
+        String raw = str(value).trim();
+        if ((raw.startsWith("[") && raw.endsWith("]")) || (raw.startsWith("{") && raw.endsWith("}")))
+        {
+            try
+            {
+                return mediaUrlList(objectMapper.readValue(raw, Object.class));
+            }
+            catch (Exception e)
+            {
+                // Fall through to the legacy comma-separated format.
+            }
+        }
+        for (String item : raw.split("[,\\n]"))
+        {
+            String text = item.trim().replaceAll("^[\\\"']|[\\\"']$", "");
             if (text.length() > 0)
             {
                 result.add(text);
@@ -8335,17 +8755,91 @@ public class CourseApiController
 
     private static List<String> stableMediaUrlList(Object value)
     {
-        List<String> result = new ArrayList<>();
+        LinkedHashSet<String> result = new LinkedHashSet<>();
         for (String item : mediaUrlList(value))
         {
-            String lower = item.toLowerCase();
-            if (lower.startsWith("data:") || lower.startsWith("blob:") || lower.startsWith("file:"))
+            String normalized = normalizeStableMediaUrl(item);
+            if (normalized.length() == 0)
             {
                 continue;
             }
-            result.add(item);
+            result.add(normalized);
         }
-        return result;
+        return new ArrayList<>(result);
+    }
+
+    private static String normalizeStableMediaUrl(Object value)
+    {
+        String item = str(value).trim().replace('\\', '/');
+        if (item.length() == 0)
+        {
+            return "";
+        }
+        String lower = item.toLowerCase();
+        if (lower.startsWith("data:") || lower.startsWith("blob:") || lower.startsWith("file:")
+            || lower.startsWith("wxfile:") || lower.startsWith("content:") || lower.startsWith("capacitor:")
+            || lower.startsWith("http://tmp") || lower.startsWith("https://tmp"))
+        {
+            return "";
+        }
+        int proxyIndex = lower.indexOf("/course/app/media?");
+        if (proxyIndex >= 0)
+        {
+            String query = item.substring(proxyIndex + "/course/app/media?".length());
+            for (String pair : query.split("&"))
+            {
+                int equals = pair.indexOf('=');
+                if (equals > 0 && "path".equalsIgnoreCase(pair.substring(0, equals)))
+                {
+                    try
+                    {
+                        return normalizeStableMediaUrl(URLDecoder.decode(pair.substring(equals + 1), StandardCharsets.UTF_8.name()));
+                    }
+                    catch (Exception e)
+                    {
+                        return normalizeStableMediaUrl(pair.substring(equals + 1));
+                    }
+                }
+            }
+        }
+        int schemeIndex = lower.indexOf("://");
+        if (schemeIndex > 0)
+        {
+            int pathIndex = item.indexOf('/', schemeIndex + 3);
+            if (pathIndex > 0)
+            {
+                String path = item.substring(pathIndex);
+                if (path.matches("^/(prod-api/)?(profile|avatar|upload|uploads)/.+"))
+                {
+                    return normalizeStableMediaUrl(path.replaceFirst("^/prod-api", ""));
+                }
+            }
+            return item;
+        }
+        if (item.matches("^/prod-api/(profile|avatar|upload|uploads)/.+"))
+        {
+            return item.substring("/prod-api".length());
+        }
+        return item;
+    }
+
+    private static List<String> firstMediaUrlList(Object... values)
+    {
+        for (Object value : values)
+        {
+            List<String> urls = mediaUrlList(value);
+            if (!urls.isEmpty())
+            {
+                return urls;
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    private static String firstMediaUrl(Object... values)
+    {
+        List<String> urls = firstMediaUrlList(values);
+        return urls.isEmpty() ? "" : urls.get(0);
     }
 
     private static String firstStableMediaUrl(Object value)
