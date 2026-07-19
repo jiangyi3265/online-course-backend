@@ -3585,6 +3585,7 @@ public class CourseApiController
     private static Map<String, Object> courseForApp(Map<String, Object> course, Map<String, Object> user)
     {
         Map<String, Object> result = objectMapper.convertValue(course, new TypeReference<Map<String, Object>>() {});
+        sanitizeCourseVideoSources(result);
         String intro = stripCourseYear(firstNonBlank(result.get("introduction"), result.get("intro"), result.get("description"), result.get("sub")));
         result.put("full", stripCourseYear(result.get("full")));
         result.put("title", stripCourseYear(result.get("title")));
@@ -3598,6 +3599,53 @@ public class CourseApiController
         applyLessonProgressToCourse(result, user);
         applyAttemptStatusToCourse(result, user);
         return result;
+    }
+
+    /**
+     * The app only receives a boolean marker for playable lesson nodes. Raw video locations must
+     * never travel with the course outline because that would bypass the protected stream API.
+     */
+    @SuppressWarnings("unchecked")
+    private static void sanitizeCourseVideoSources(Object node)
+    {
+        if (node instanceof List)
+        {
+            for (Object item : (List<Object>) node)
+            {
+                sanitizeCourseVideoSources(item);
+            }
+            return;
+        }
+        if (!(node instanceof Map))
+        {
+            return;
+        }
+        Map<String, Object> item = (Map<String, Object>) node;
+        boolean hasVideo = str(item.get("videoUrl")).trim().length() > 0
+            || str(item.get("defaultVideoUrl")).trim().length() > 0;
+        item.remove("videoUrl");
+        item.remove("defaultVideoUrl");
+        for (String field : Arrays.asList("fileUrl", "url"))
+        {
+            if (isVideoSource(str(item.get(field))))
+            {
+                hasVideo = true;
+                item.remove(field);
+            }
+        }
+        for (Object child : new ArrayList<>(item.values()))
+        {
+            sanitizeCourseVideoSources(child);
+        }
+        if (hasVideo)
+        {
+            item.put("hasVideo", true);
+        }
+    }
+
+    private static boolean isVideoSource(String value)
+    {
+        return str(value).trim().matches("(?i)^.+\\.(?:mp4|webm|mov|m4v|m3u8)(?:[?#].*)?$");
     }
 
     private static void applyLessonProgressToCourse(Map<String, Object> course, Map<String, Object> user)
