@@ -104,6 +104,9 @@ public class CourseApiController
     @Autowired
     private ServerConfig serverConfig;
 
+    @Autowired
+    private ProtectedVideoService protectedVideoService;
+
     static
     {
         initUsers();
@@ -121,6 +124,7 @@ public class CourseApiController
         File file = dataFile();
         if (!file.exists())
         {
+            protectedVideoService.prepareSourcesAsync(courses);
             return;
         }
         synchronized (storeLock)
@@ -189,6 +193,7 @@ public class CourseApiController
                 throw new IllegalStateException("读取课程数据失败", e);
             }
         }
+        protectedVideoService.prepareSourcesAsync(courses);
     }
 
     @PostMapping("/app/login")
@@ -781,7 +786,34 @@ public class CourseApiController
             }
         }
         boolean locked = lessonVideoLocked(user, courseId, lessonId);
-        String streamUrl = locked ? "" : issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+        boolean preparing = false;
+        String protectionError = "";
+        String streamUrl = "";
+        if (!locked)
+        {
+            if (protectedVideoService.isReady(videoUrl))
+            {
+                String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
+                streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+            }
+            else
+            {
+                protectionError = protectedVideoService.failure(videoUrl);
+                if (protectionError.length() == 0)
+                {
+                    protectedVideoService.prepareAsync(videoUrl);
+                    if (protectedVideoService.isReady(videoUrl))
+                    {
+                        String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
+                        streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                    }
+                    else
+                    {
+                        preparing = true;
+                    }
+                }
+            }
+        }
         Map<String, Object> data = map(
             "id", lessonId,
             "title", lessonId,
@@ -796,55 +828,92 @@ public class CourseApiController
             "card", map("title", "讲点卡", "items", Arrays.asList("先看题目条件，圈出关键词。", "写出对应知识点公式或定义。", "完成例题后进入真题讲练巩固。")),
             "progress", lessonProgress.get(progressKey(user, lessonId)),
             "locked", locked,
+            "preparing", preparing,
+            "protectionMode", locked ? "" : "hls-aes-128",
+            "protectionError", protectionError,
+            "retryAfterSeconds", preparing ? 3 : 0,
             "lockReason", locked ? "请按课程顺序学习：完成上一节视频（达95%）及其配套练习后，再解锁本节。" : ""
         );
         return AjaxResult.success(data);
     }
 
     /**
-     * 课程视频只通过短时令牌流式读取，不向浏览器暴露后台保存的原始文件地址。
-     * Range 响应保证手机浏览器可以正常播放；响应始终为 inline，且禁止缓存。
+     * The former complete-file MP4 route is deliberately retired. A valid
+     * playback token can only be used against the encrypted HLS endpoints.
      */
     @GetMapping("/app/lesson/stream")
     public void lessonVideoStream(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
         throws IOException
     {
-        Map<String, Object> grant = videoStreamTokens.get(str(token).trim());
-        long nowMillis = System.currentTimeMillis();
-        if (grant == null || longValue(grant.get("expiresAt")) < nowMillis)
-        {
-            videoStreamTokens.remove(str(token).trim());
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证已失效，请返回课程重新进入");
-            return;
-        }
+        applyProtectedVideoHeaders(response);
+        response.sendError(HttpServletResponse.SC_GONE, "完整视频下载通道已关闭");
+    }
+
+    @GetMapping(value = "/app/lesson/playlist.m3u8", produces = "application/vnd.apple.mpegurl;charset=UTF-8")
+    public void lessonVideoPlaylist(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+        throws IOException
+    {
+        Map<String, Object> grant = validVideoGrant(token, request, response);
+        if (grant == null) return;
         String source = str(grant.get("source")).trim();
-        if (source.length() == 0)
+        try
+        {
+            String playlist = protectedVideoService.protectedPlaylist(source, str(token).trim());
+            byte[] content = playlist.getBytes(StandardCharsets.UTF_8);
+            applyProtectedVideoHeaders(response);
+            response.setContentType("application/vnd.apple.mpegurl;charset=UTF-8");
+            response.setContentLength(content.length);
+            response.getOutputStream().write(content);
+        }
+        catch (IOException error)
+        {
+            response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "安全视频正在准备，请稍后重试");
+        }
+    }
+
+    @GetMapping(value = "/app/lesson/segment.ts", produces = "video/mp2t")
+    public void lessonVideoSegment(@RequestParam String token, @RequestParam String name,
+        HttpServletRequest request, HttpServletResponse response) throws IOException
+    {
+        Map<String, Object> grant = validVideoGrant(token, request, response);
+        if (grant == null) return;
+        File segment = protectedVideoService.segment(str(grant.get("source")), name);
+        if (segment == null)
         {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        response.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate");
-        response.setHeader("Pragma", "no-cache");
-        response.setHeader("Accept-Ranges", "bytes");
-        response.setHeader("Content-Disposition", "inline; filename=course-video.mp4");
-        response.setHeader("X-Content-Type-Options", "nosniff");
-        response.setHeader("Cross-Origin-Resource-Policy", "same-site");
-
-        File localFile = resolveLocalVideoFile(source);
-        if (localFile != null)
+        applyProtectedVideoHeaders(response);
+        response.setContentType("video/mp2t");
+        response.setContentLengthLong(segment.length());
+        try (InputStream input = new FileInputStream(segment); OutputStream output = response.getOutputStream())
         {
-            streamLocalVideo(localFile, request, response);
-            return;
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
         }
-        if (source.matches("^https?://.+"))
-        {
-            proxyRemoteVideo(source, request, response);
-            return;
-        }
-        response.sendError(HttpServletResponse.SC_NOT_FOUND);
     }
 
-    private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user)
+    @GetMapping(value = "/app/lesson/key.bin", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public void lessonVideoKey(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+        throws IOException
+    {
+        Map<String, Object> grant = validVideoGrant(token, request, response);
+        if (grant == null) return;
+        File key = protectedVideoService.keyFile(str(grant.get("source")));
+        if (key == null)
+        {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        applyProtectedVideoHeaders(response);
+        response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+        response.setContentLengthLong(key.length());
+        Files.copy(key.toPath(), response.getOutputStream());
+    }
+
+    private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user,
+        HttpServletRequest request)
     {
         long nowMillis = System.currentTimeMillis();
         videoStreamTokens.entrySet().removeIf(entry -> longValue(entry.getValue().get("expiresAt")) < nowMillis);
@@ -854,9 +923,54 @@ public class CourseApiController
             "courseId", courseId,
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
+            "fingerprint", videoClientFingerprint(request),
+            "issuedAt", nowMillis,
             "expiresAt", nowMillis + VIDEO_STREAM_TOKEN_TTL_MILLIS
         ));
-        return "/course/app/lesson/stream?token=" + token;
+        return token;
+    }
+
+    private Map<String, Object> validVideoGrant(String token, HttpServletRequest request, HttpServletResponse response)
+        throws IOException
+    {
+        String normalized = str(token).trim();
+        Map<String, Object> grant = videoStreamTokens.get(normalized);
+        long nowMillis = System.currentTimeMillis();
+        if (grant == null || longValue(grant.get("expiresAt")) < nowMillis)
+        {
+            videoStreamTokens.remove(normalized);
+            response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证已失效，请返回课程重新进入");
+            return null;
+        }
+        if (!Objects.equals(str(grant.get("fingerprint")), videoClientFingerprint(request)))
+        {
+            response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证与当前设备不匹配");
+            return null;
+        }
+        if (str(grant.get("source")).trim().length() == 0)
+        {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND);
+            return null;
+        }
+        return grant;
+    }
+
+    private String videoClientFingerprint(HttpServletRequest request)
+    {
+        String forwarded = str(request.getHeader("X-Forwarded-For")).trim();
+        String address = forwarded.length() > 0 ? forwarded.split(",", 2)[0].trim() : str(request.getRemoteAddr()).trim();
+        String userAgent = str(request.getHeader("User-Agent")).trim();
+        return Integer.toHexString(Objects.hash(address, userAgent));
+    }
+
+    private void applyProtectedVideoHeaders(HttpServletResponse response)
+    {
+        response.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        response.setHeader("X-Download-Options", "noopen");
     }
 
     private File resolveLocalVideoFile(String source) throws IOException
@@ -2117,6 +2231,7 @@ public class CourseApiController
         courses.add(course);
         logOperation("课程管理", "后台管理员", course.get("courseName"), "新增课程", "已完成");
         persistData();
+        protectedVideoService.prepareSourcesAsync(course);
         return AjaxResult.success(course);
     }
 
@@ -2143,6 +2258,7 @@ public class CourseApiController
         course.putAll(next);
         logOperation("课程管理", "后台管理员", course.get("courseName"), "编辑课程", "已完成");
         persistData();
+        protectedVideoService.prepareSourcesAsync(course);
         return AjaxResult.success(course);
     }
 

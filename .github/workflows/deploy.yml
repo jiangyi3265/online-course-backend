@@ -696,6 +696,25 @@ jobs:
 
           mkdir -p "$APP_DIR/logs" "$APP_DIR/uploadPath"
 
+          # Protected course playback is generated as AES-128 HLS on the
+          # server. Fail the deployment instead of ever falling back to a
+          # directly downloadable MP4 when the converter is unavailable.
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+            elif command -v dnf >/dev/null 2>&1; then
+              dnf install -y ffmpeg
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y ffmpeg
+            fi
+          fi
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg is required for protected video playback"
+            exit 1
+          fi
+          ffmpeg -version
+
           cat > "$APP_DIR/run-$SERVICE_NAME.sh" <<'RUNNER'
           #!/usr/bin/env bash
           set -euo pipefail
