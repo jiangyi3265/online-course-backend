@@ -281,6 +281,16 @@ jobs:
 
           echo "Creating remote release directory..."
           retry 6 timeout 90s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$RELEASE_DIR/source' && mkdir -p '$RELEASE_DIR' '$APP_DIR/logs' '$APP_DIR/uploadPath'"
+          if ! timeout 60s ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "command -v ffmpeg >/dev/null 2>&1"; then
+            echo "Preparing static FFmpeg on the GitHub runner..."
+            rm -rf .deploy-tools
+            npm install --prefix .deploy-tools --no-save --no-audit --no-fund ffmpeg-static@5.2.0
+            FFMPEG_BINARY="$(node -e "process.stdout.write(require('./.deploy-tools/node_modules/ffmpeg-static'))")"
+            test -x "$FFMPEG_BINARY"
+            echo "Uploading static FFmpeg to the server..."
+            retry 5 timeout 8m scp $SCP_OPTS "$FFMPEG_BINARY" "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ffmpeg"
+            retry 5 timeout 2m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "install -m 755 '$RELEASE_DIR/ffmpeg' /usr/local/bin/ffmpeg && /usr/local/bin/ffmpeg -version"
+          fi
           if [ -f sql/ry_20250522.sql ]; then
             echo "Uploading database bootstrap SQL..."
             retry 4 timeout 2m scp $SCP_OPTS sql/ry_20250522.sql "$DEPLOY_USER@$DEPLOY_HOST:$RELEASE_DIR/ry_20250522.sql"
@@ -707,33 +717,6 @@ jobs:
               dnf install -y ffmpeg || true
             elif command -v yum >/dev/null 2>&1; then
               yum install -y ffmpeg || true
-            fi
-          fi
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            FFMPEG_ARCH=""
-            case "$(uname -m)" in
-              x86_64|amd64) FFMPEG_ARCH="amd64" ;;
-              aarch64|arm64) FFMPEG_ARCH="arm64" ;;
-            esac
-            if [ -n "$FFMPEG_ARCH" ]; then
-              FFMPEG_TMP="$(mktemp -d)"
-              curl -fL --retry 4 --connect-timeout 20 --max-time 300 \
-                "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FFMPEG_ARCH}-static.tar.xz" \
-                -o "$FFMPEG_TMP/ffmpeg.tar.xz"
-              tar -xJf "$FFMPEG_TMP/ffmpeg.tar.xz" -C "$FFMPEG_TMP"
-              FFMPEG_DIR=""
-              for candidate in "$FFMPEG_TMP"/ffmpeg-*-static; do
-                if [ -d "$candidate" ]; then
-                  FFMPEG_DIR="$candidate"
-                  break
-                fi
-              done
-              test -x "$FFMPEG_DIR/ffmpeg"
-              install -m 755 "$FFMPEG_DIR/ffmpeg" /usr/local/bin/ffmpeg
-              if [ -x "$FFMPEG_DIR/ffprobe" ]; then
-                install -m 755 "$FFMPEG_DIR/ffprobe" /usr/local/bin/ffprobe
-              fi
-              rm -rf "$FFMPEG_TMP"
             fi
           fi
           if ! command -v ffmpeg >/dev/null 2>&1; then
