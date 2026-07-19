@@ -3,6 +3,11 @@ package com.ruoyi.web.controller.course;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -89,6 +95,8 @@ public class CourseApiController
     private static final Map<String, Object> frontendSettings = new LinkedHashMap<>();
     private static final Map<String, Map<String, Object>> lessonProgress = new ConcurrentHashMap<>();
     private static final Map<String, String> verificationCodes = new ConcurrentHashMap<>();
+    private static final Map<String, Map<String, Object>> videoStreamTokens = new ConcurrentHashMap<>();
+    private static final long VIDEO_STREAM_TOKEN_TTL_MILLIS = 2L * 60L * 60L * 1000L;
 
     @Value("${ruoyi.profile:}")
     private String profilePath;
@@ -512,7 +520,7 @@ public class CourseApiController
     {
         Map<String, Object> requester = currentUser(request);
         Map<String, Object> user = resolveStudyUser(requester, userId);
-        return AjaxResult.success(submittedAndDraftOfflineReviews(user, courseId, true));
+        return AjaxResult.success(submittedAndDraftOfflineReviews(user, courseId, false));
     }
 
     @PostMapping("/app/offline-reviews")
@@ -535,6 +543,11 @@ public class CourseApiController
             courseId = scopedCourseId(doc.get("courseId"));
         }
         String id = str(body.get("id")).trim();
+        boolean submitted = boolValue(body.get("submitted"), boolValue(body.get("reviewSubmitted"), !"draft".equals(str(body.get("status")))));
+        if (!submitted)
+        {
+            return AjaxResult.success(map("recorded", false, "message", "草稿仅保留在当前页面，点击保存记录后才写入"));
+        }
         Map<String, Object> record = findOfflineReview(id, user, docId, courseId);
         if (record == null)
         {
@@ -543,7 +556,6 @@ public class CourseApiController
             record.put("createdAt", now());
             offlineReviews.add(record);
         }
-        boolean submitted = boolValue(body.get("submitted"), boolValue(body.get("reviewSubmitted"), !"draft".equals(str(body.get("status")))));
         record.put("userId", user.get("id"));
         record.put("userName", firstNonBlank(user.get("name"), user.get("nickName"), user.get("phone")));
         record.put("docId", docId);
@@ -769,10 +781,11 @@ public class CourseApiController
             }
         }
         boolean locked = lessonVideoLocked(user, courseId, lessonId);
+        String streamUrl = locked ? "" : issueVideoStreamToken(videoUrl, courseId, lessonId, user);
         Map<String, Object> data = map(
             "id", lessonId,
             "title", lessonId,
-            "videoUrl", videoUrl,
+            "videoUrl", streamUrl,
             "poster", poster,
             "courseTitle", course == null ? "" : stripCourseYear(course.get("courseName")),
             "chapterTitle", lessonMeta == null ? "" : str(lessonMeta.get("chapterTitle")),
@@ -786,6 +799,180 @@ public class CourseApiController
             "lockReason", locked ? "请按课程顺序学习：完成上一节视频（达95%）及其配套练习后，再解锁本节。" : ""
         );
         return AjaxResult.success(data);
+    }
+
+    /**
+     * 课程视频只通过短时令牌流式读取，不向浏览器暴露后台保存的原始文件地址。
+     * Range 响应保证手机浏览器可以正常播放；响应始终为 inline，且禁止缓存。
+     */
+    @GetMapping("/app/lesson/stream")
+    public void lessonVideoStream(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+        throws IOException
+    {
+        Map<String, Object> grant = videoStreamTokens.get(str(token).trim());
+        long nowMillis = System.currentTimeMillis();
+        if (grant == null || longValue(grant.get("expiresAt")) < nowMillis)
+        {
+            videoStreamTokens.remove(str(token).trim());
+            response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证已失效，请返回课程重新进入");
+            return;
+        }
+        String source = str(grant.get("source")).trim();
+        if (source.length() == 0)
+        {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        response.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Accept-Ranges", "bytes");
+        response.setHeader("Content-Disposition", "inline; filename=course-video.mp4");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Cross-Origin-Resource-Policy", "same-site");
+
+        File localFile = resolveLocalVideoFile(source);
+        if (localFile != null)
+        {
+            streamLocalVideo(localFile, request, response);
+            return;
+        }
+        if (source.matches("^https?://.+"))
+        {
+            proxyRemoteVideo(source, request, response);
+            return;
+        }
+        response.sendError(HttpServletResponse.SC_NOT_FOUND);
+    }
+
+    private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user)
+    {
+        long nowMillis = System.currentTimeMillis();
+        videoStreamTokens.entrySet().removeIf(entry -> longValue(entry.getValue().get("expiresAt")) < nowMillis);
+        String token = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
+        videoStreamTokens.put(token, map(
+            "source", source,
+            "courseId", courseId,
+            "lessonId", lessonId,
+            "userId", user == null ? null : user.get("id"),
+            "expiresAt", nowMillis + VIDEO_STREAM_TOKEN_TTL_MILLIS
+        ));
+        return "/course/app/lesson/stream?token=" + token;
+    }
+
+    private File resolveLocalVideoFile(String source) throws IOException
+    {
+        String requested = str(source).trim().replace('\\', '/');
+        if (requested.matches("^https?://.+"))
+        {
+            try
+            {
+                requested = new URL(requested).getPath();
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
+        }
+        requested = URLDecoder.decode(requested, StandardCharsets.UTF_8.name()).replaceFirst("^/prod-api", "");
+        if (!requested.matches("^/(profile|avatar|upload|uploads)/.+\\.(mp4|webm|mov|m4v)(?:$|[?#].*)"))
+        {
+            return null;
+        }
+        int queryIndex = requested.indexOf('?');
+        if (queryIndex >= 0) requested = requested.substring(0, queryIndex);
+        String relative = requested.startsWith("/profile/") ? requested.substring("/profile/".length()) : requested.substring(1);
+        File root = new File(firstNonBlank(profilePath, RuoYiConfig.getProfile())).getCanonicalFile();
+        File target = new File(root, relative).getCanonicalFile();
+        String rootPrefix = root.getPath().endsWith(File.separator) ? root.getPath() : root.getPath() + File.separator;
+        return target.getPath().startsWith(rootPrefix) && target.isFile() ? target : null;
+    }
+
+    private void streamLocalVideo(File file, HttpServletRequest request, HttpServletResponse response) throws IOException
+    {
+        long total = file.length();
+        long start = 0L;
+        long end = Math.max(0L, total - 1L);
+        String range = str(request.getHeader("Range")).trim();
+        boolean partial = range.startsWith("bytes=");
+        if (partial)
+        {
+            String[] bounds = range.substring("bytes=".length()).split("-", 2);
+            try
+            {
+                if (bounds.length > 0 && bounds[0].trim().length() > 0) start = Long.parseLong(bounds[0].trim());
+                if (bounds.length > 1 && bounds[1].trim().length() > 0) end = Long.parseLong(bounds[1].trim());
+            }
+            catch (NumberFormatException ignored)
+            {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + total);
+                return;
+            }
+        }
+        start = Math.max(0L, Math.min(start, Math.max(0L, total - 1L)));
+        end = Math.max(start, Math.min(end, Math.max(0L, total - 1L)));
+        long length = total == 0L ? 0L : end - start + 1L;
+        String contentType = Files.probeContentType(file.toPath());
+        response.setContentType(contentType == null ? "video/mp4" : contentType);
+        response.setContentLengthLong(length);
+        if (partial)
+        {
+            response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
+            response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + total);
+        }
+        try (RandomAccessFile input = new RandomAccessFile(file, "r"); OutputStream output = response.getOutputStream())
+        {
+            input.seek(start);
+            byte[] buffer = new byte[64 * 1024];
+            long remaining = length;
+            while (remaining > 0L)
+            {
+                int read = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                if (read < 0) break;
+                output.write(buffer, 0, read);
+                remaining -= read;
+            }
+            output.flush();
+        }
+    }
+
+    private void proxyRemoteVideo(String source, HttpServletRequest request, HttpServletResponse response) throws IOException
+    {
+        HttpURLConnection connection = (HttpURLConnection) new URL(source).openConnection();
+        connection.setInstanceFollowRedirects(true);
+        connection.setConnectTimeout(10000);
+        connection.setReadTimeout(30000);
+        connection.setRequestProperty("User-Agent", "CourseVideoPlayer/1.0");
+        String range = str(request.getHeader("Range")).trim();
+        if (range.length() > 0) connection.setRequestProperty("Range", range);
+        int status = connection.getResponseCode();
+        if (status >= 400)
+        {
+            response.sendError(status == 404 ? HttpServletResponse.SC_NOT_FOUND : HttpServletResponse.SC_BAD_GATEWAY);
+            connection.disconnect();
+            return;
+        }
+        response.setStatus(status == HttpServletResponse.SC_PARTIAL_CONTENT ? status : HttpServletResponse.SC_OK);
+        String contentType = connection.getContentType();
+        response.setContentType(contentType == null ? "video/mp4" : contentType);
+        String contentRange = connection.getHeaderField("Content-Range");
+        if (contentRange != null) response.setHeader("Content-Range", contentRange);
+        long length = connection.getContentLengthLong();
+        if (length >= 0L) response.setContentLengthLong(length);
+        try (InputStream input = connection.getInputStream(); OutputStream output = response.getOutputStream())
+        {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0)
+            {
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+        }
+        finally
+        {
+            connection.disconnect();
+        }
     }
 
     // 月卡顺序解锁：返回本课程当前用户被锁定的课时视频/配套练习标题（非月卡返回 enabled=false 空集）
@@ -834,7 +1021,7 @@ public class CourseApiController
                 ? map("lessonId", lessonId, "recorded", false, "currentTime", currentTime)
                 : existing);
         }
-        int percent = ended ? 100 : intValue(body.get("percent"));
+        int percent = intValue(body.get("percent"));
         if (percent == 0 && duration > 0)
         {
             percent = Math.round((float) (currentTime / duration * 100));
@@ -853,20 +1040,33 @@ public class CourseApiController
         String progressEventId = str(body.get("progressEventId")).trim();
         boolean duplicateEvent = existing != null && progressEventId.length() > 0
             && progressEventId.equals(str(existing.get("lastProgressEventId")));
+        long receivedAtMillis = System.currentTimeMillis();
         if (!duplicateEvent && watchDelta > 0d)
         {
-            double safeDelta = duration > 0d ? Math.min(watchDelta, duration) : watchDelta;
+            String currentSession = str(body.get("progressSessionId"));
+            String previousSession = existing == null ? "" : str(existing.get("progressSessionId"));
+            long previousReceivedAt = existing == null ? 0L : longValue(existing.get("lastProgressReceivedAtMillis"));
+            double elapsedAllowance = 12d;
+            if (previousReceivedAt > 0L && currentSession.equals(previousSession))
+            {
+                elapsedAllowance = Math.max(1d, Math.min(30d, (receivedAtMillis - previousReceivedAt) / 1000d + 1.5d));
+            }
+            double safeDelta = Math.min(watchDelta, elapsedAllowance);
+            if (duration > 0d)
+            {
+                safeDelta = Math.min(safeDelta, Math.max(0d, duration - totalWatchedSeconds));
+            }
             totalWatchedSeconds += safeDelta;
         }
-        if (watchDelta <= 0d && duration > 0d)
-        {
-            totalWatchedSeconds = Math.max(totalWatchedSeconds, duration * bestPercent / 100d);
-        }
+        if (duration > 0d) totalWatchedSeconds = Math.min(duration, totalWatchedSeconds);
         totalWatchedSeconds = Math.max(0d, Math.round(totalWatchedSeconds * 1000d) / 1000d);
         int cumulativePercent = duration > 0d
-            ? Math.max(0, Math.round((float) (totalWatchedSeconds / duration * 100d)))
-            : Math.max(existing == null ? 0 : intValue(existing.get("cumulativePercent")), bestPercent);
-        int completedCount = cumulativePercent / 100;
+            ? Math.max(0, Math.min(100, Math.round((float) (totalWatchedSeconds / duration * 100d))))
+            : Math.max(0, Math.min(100, Math.max(existing == null ? 0 : intValue(existing.get("cumulativePercent")), bestPercent)));
+        percent = Math.min(percent, Math.min(100, cumulativePercent + 1));
+        bestPercent = Math.max(existing == null ? 0 : progressBestPercent(existing), percent);
+        ended = ended && cumulativePercent >= 95;
+        int completedCount = cumulativePercent >= 100 ? 1 : 0;
         Map<String, Object> progress = map(
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
@@ -884,6 +1084,7 @@ public class CourseApiController
             "ended", ended,
             "progressSessionId", body.get("progressSessionId"),
             "lastProgressEventId", progressEventId,
+            "lastProgressReceivedAtMillis", receivedAtMillis,
             "updatedAt", now()
         );
         lessonProgress.put(key, progress);
@@ -1978,10 +2179,8 @@ public class CourseApiController
         {
             doc.put("id", "doc-" + System.currentTimeMillis());
         }
-        if (str(doc.get("uploadTime")).length() == 0)
-        {
-            doc.put("uploadTime", now());
-        }
+        doc.put("uploadTime", now());
+        doc.put("createdAt", doc.get("uploadTime"));
         ensureDocDefaults(doc);
         if (hasDuplicateDocTitle(doc, str(doc.get("id"))))
         {
@@ -2009,6 +2208,10 @@ public class CourseApiController
         Map<String, Object> next = new LinkedHashMap<>(doc);
         next.putAll(body);
         next.put("id", id);
+        if (!Objects.equals(str(doc.get("fileUrl")), str(next.get("fileUrl"))))
+        {
+            next.put("uploadTime", now());
+        }
         ensureDocDefaults(next);
         if (hasDuplicateDocTitle(next, id))
         {
@@ -3095,7 +3298,13 @@ public class CourseApiController
             doc.put("category", str(doc.get("title")).contains("试卷") ? "paper" : "lecture");
             changed = true;
         }
-        if (str(doc.get("uploadTime")).length() == 0)
+        String inferredUploadTime = uploadTimeFromMediaPath(doc.get("fileUrl"));
+        if (inferredUploadTime.length() > 0 && !str(doc.get("uploadTime")).startsWith(inferredUploadTime.substring(0, 10)))
+        {
+            doc.put("uploadTime", inferredUploadTime);
+            changed = true;
+        }
+        else if (str(doc.get("uploadTime")).length() == 0)
         {
             doc.put("uploadTime", "paper".equals(doc.get("category")) ? "2026-05-26T10:15:00" : "2026-05-26T10:11:00");
             changed = true;
@@ -3106,6 +3315,19 @@ public class CourseApiController
             changed = true;
         }
         return changed;
+    }
+
+    private static String uploadTimeFromMediaPath(Object value)
+    {
+        String[] parts = str(value).replace('\\', '/').split("/");
+        for (int i = 0; i + 2 < parts.length; i++)
+        {
+            if (parts[i].matches("20\\d{2}") && parts[i + 1].matches("\\d{1,2}") && parts[i + 2].matches("\\d{1,2}"))
+            {
+                return String.format("%s-%02d-%02dT00:00:00", parts[i], intValue(parts[i + 1]), intValue(parts[i + 2]));
+            }
+        }
+        return "";
     }
 
     private static boolean addDocIfMissing(Map<String, Object> doc)
@@ -5189,7 +5411,9 @@ public class CourseApiController
 
     private static boolean isWeakWrong(Map<String, Object> wrong)
     {
-        return wrongSourceTags(wrong).size() >= 3 || intValue(wrong.get("retryWrongCount")) >= 2 || intValue(wrong.get("retryCount")) >= 3;
+        return !Boolean.TRUE.equals(wrong.get("mastered"))
+            && wrongSourceTags(wrong).contains("错题重练")
+            && !boolValue(wrong.get("lastRetryCorrect"), false);
     }
 
     private static int countWrongByMastered(List<Map<String, Object>> list, boolean mastered)
@@ -5210,7 +5434,7 @@ public class CourseApiController
         List<Map<String, Object>> list = new ArrayList<>();
         for (Map<String, Object> wrong : source)
         {
-            if (isWeakWrong(wrong) && matchesWrongSource(wrong, sourceFilter))
+            if (!Boolean.TRUE.equals(wrong.get("mastered")) && isWeakWrong(wrong) && matchesWrongSource(wrong, sourceFilter))
             {
                 list.add(wrongbookItem(wrong));
             }
@@ -8540,12 +8764,12 @@ public class CourseApiController
         }
         if (progress.containsKey("cumulativePercent"))
         {
-            return Math.max(0, intValue(progress.get("cumulativePercent")));
+            return Math.max(0, Math.min(100, intValue(progress.get("cumulativePercent"))));
         }
         double duration = doubleValue(progress.get("duration"));
         if (duration > 0d)
         {
-            return Math.max(0, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d)));
+            return Math.max(0, Math.min(100, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d))));
         }
         return progressBestPercent(progress);
     }
@@ -8895,6 +9119,22 @@ public class CourseApiController
         catch (Exception e)
         {
             return 0;
+        }
+    }
+
+    private static long longValue(Object value)
+    {
+        if (value instanceof Number)
+        {
+            return ((Number) value).longValue();
+        }
+        try
+        {
+            return Long.parseLong(str(value));
+        }
+        catch (Exception ignored)
+        {
+            return 0L;
         }
     }
 
