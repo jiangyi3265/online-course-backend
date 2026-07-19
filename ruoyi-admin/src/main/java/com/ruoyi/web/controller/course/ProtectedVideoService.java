@@ -271,7 +271,7 @@ public class ProtectedVideoService
         List<String> info = Arrays.asList(
             "key.bin",
             keyFile.getAbsolutePath(),
-            "0x" + hex(iv)
+            hex(iv)
         );
         Files.write(new File(output, "key-info.txt").toPath(), info, StandardCharsets.UTF_8);
     }
