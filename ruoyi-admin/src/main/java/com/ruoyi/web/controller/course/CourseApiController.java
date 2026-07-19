@@ -1037,11 +1037,16 @@ public class CourseApiController
                 totalWatchedSeconds = existingDuration * Math.max(0, Math.min(100, progressBestPercent(existing))) / 100d;
             }
         }
+        int completedBefore = duration > 0d ? Math.max(0, (int) Math.floor(totalWatchedSeconds / duration)) : 0;
         String progressEventId = str(body.get("progressEventId")).trim();
         boolean duplicateEvent = existing != null && progressEventId.length() > 0
             && progressEventId.equals(str(existing.get("lastProgressEventId")));
+        if (duplicateEvent)
+        {
+            return AjaxResult.success(existing);
+        }
         long receivedAtMillis = System.currentTimeMillis();
-        if (!duplicateEvent && watchDelta > 0d)
+        if (watchDelta > 0d)
         {
             String currentSession = str(body.get("progressSessionId"));
             String previousSession = existing == null ? "" : str(existing.get("progressSessionId"));
@@ -1052,21 +1057,22 @@ public class CourseApiController
                 elapsedAllowance = Math.max(1d, Math.min(30d, (receivedAtMillis - previousReceivedAt) / 1000d + 1.5d));
             }
             double safeDelta = Math.min(watchDelta, elapsedAllowance);
-            if (duration > 0d)
-            {
-                safeDelta = Math.min(safeDelta, Math.max(0d, duration - totalWatchedSeconds));
-            }
             totalWatchedSeconds += safeDelta;
         }
-        if (duration > 0d) totalWatchedSeconds = Math.min(duration, totalWatchedSeconds);
         totalWatchedSeconds = Math.max(0d, Math.round(totalWatchedSeconds * 1000d) / 1000d);
+        boolean completedThisPass = ended && duration > 0d
+            && totalWatchedSeconds >= ((completedBefore + 1d) * duration - duration * 0.05d);
+        if (completedThisPass)
+        {
+            totalWatchedSeconds = Math.max(totalWatchedSeconds, (completedBefore + 1d) * duration);
+        }
         int cumulativePercent = duration > 0d
-            ? Math.max(0, Math.min(100, Math.round((float) (totalWatchedSeconds / duration * 100d))))
-            : Math.max(0, Math.min(100, Math.max(existing == null ? 0 : intValue(existing.get("cumulativePercent")), bestPercent)));
+            ? Math.max(0, Math.round((float) (totalWatchedSeconds / duration * 100d)))
+            : Math.max(0, Math.max(existing == null ? 0 : intValue(existing.get("cumulativePercent")), bestPercent));
         percent = Math.min(percent, Math.min(100, cumulativePercent + 1));
         bestPercent = Math.max(existing == null ? 0 : progressBestPercent(existing), percent);
-        ended = ended && cumulativePercent >= 95;
-        int completedCount = cumulativePercent >= 100 ? 1 : 0;
+        ended = completedThisPass;
+        int completedCount = cumulativePercent / 100;
         Map<String, Object> progress = map(
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
@@ -4154,6 +4160,7 @@ public class CourseApiController
     {
         int learned = 0;
         int seconds = 0;
+        int cumulativeTotal = 0;
         for (Map<String, Object> progress : lessonProgress.values())
         {
             if (!sameUser(progress, user) || !courseId.equals(scopedCourseId(progress.get("courseId"))))
@@ -4166,12 +4173,13 @@ public class CourseApiController
                 continue;
             }
             seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
+            cumulativeTotal += progressCumulativePercent(progress);
             if (progressBestPercent(progress) >= 90)
             {
                 learned++;
             }
         }
-        int percent = totalLessons <= 0 ? 0 : Math.min(100, Math.round(learned * 100f / totalLessons));
+        int percent = totalLessons <= 0 ? 0 : Math.max(0, Math.round(cumulativeTotal * 1f / totalLessons));
         return map("readStudyCount", learned, "readDuration", secondsText(seconds), "progress", percent);
     }
 
@@ -4196,6 +4204,7 @@ public class CourseApiController
     {
         int learned = 0;
         int seconds = 0;
+        int cumulativeTotal = 0;
         for (Map<String, Object> progress : lessonProgress.values())
         {
             if (!sameUser(progress, user) || !courseId.equals(str(progress.get("courseId"))))
@@ -4203,12 +4212,13 @@ public class CourseApiController
                 continue;
             }
             seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
+            cumulativeTotal += progressCumulativePercent(progress);
             if (progressBestPercent(progress) >= 90)
             {
                 learned++;
             }
         }
-        int percent = totalLessons <= 0 ? 0 : Math.min(100, Math.round(learned * 100f / totalLessons));
+        int percent = totalLessons <= 0 ? 0 : Math.max(0, Math.round(cumulativeTotal * 1f / totalLessons));
         return map("readStudyCount", learned, "readDuration", secondsText(seconds), "progress", percent);
     }
 
@@ -8812,12 +8822,12 @@ public class CourseApiController
         }
         if (progress.containsKey("cumulativePercent"))
         {
-            return Math.max(0, Math.min(100, intValue(progress.get("cumulativePercent"))));
+            return Math.max(0, intValue(progress.get("cumulativePercent")));
         }
         double duration = doubleValue(progress.get("duration"));
         if (duration > 0d)
         {
-            return Math.max(0, Math.min(100, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d))));
+            return Math.max(0, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d)));
         }
         return progressBestPercent(progress);
     }
