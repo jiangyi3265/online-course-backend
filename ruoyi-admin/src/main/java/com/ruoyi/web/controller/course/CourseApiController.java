@@ -705,6 +705,7 @@ public class CourseApiController
         );
         List<Map<String, Object>> recentPractice = recentPracticeRows(userAttempts);
         List<Map<String, Object>> chapterSweep = attemptRowsByType(userAttempts, "quiz");
+        List<Map<String, Object>> attemptStats = attemptStatsRows(userAttempts);
         Map<String, Object> learning = learningStats(user, scopedCourseId);
         List<Map<String, Object>> offlineRows = submittedAndDraftOfflineReviews(user, scopedCourseId, false);
         List<String> suggestions = wrongCount > 0
@@ -718,6 +719,7 @@ public class CourseApiController
             "learningStats", learning,
             "overview", overview,
             "attempts", userAttempts.size() > 8 ? userAttempts.subList(0, 8) : userAttempts,
+            "attemptStats", attemptStats,
             "recentPractice", recentPractice,
             "practiceRows", recentPractice,
             "practiceCount", totalQuestions,
@@ -923,7 +925,7 @@ public class CourseApiController
             "courseId", courseId,
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
-            "fingerprint", videoClientFingerprint(request),
+            "fingerprint", videoClientNetworkFingerprint(request),
             "issuedAt", nowMillis,
             "expiresAt", nowMillis + VIDEO_STREAM_TOKEN_TTL_MILLIS
         ));
@@ -942,7 +944,7 @@ public class CourseApiController
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证已失效，请返回课程重新进入");
             return null;
         }
-        if (!Objects.equals(str(grant.get("fingerprint")), videoClientFingerprint(request)))
+        if (!Objects.equals(str(grant.get("fingerprint")), videoClientNetworkFingerprint(request)))
         {
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证与当前设备不匹配");
             return null;
@@ -955,12 +957,13 @@ public class CourseApiController
         return grant;
     }
 
-    private String videoClientFingerprint(HttpServletRequest request)
+    private String videoClientNetworkFingerprint(HttpServletRequest request)
     {
         String forwarded = str(request.getHeader("X-Forwarded-For")).trim();
         String address = forwarded.length() > 0 ? forwarded.split(",", 2)[0].trim() : str(request.getRemoteAddr()).trim();
-        String userAgent = str(request.getHeader("User-Agent")).trim();
-        return Integer.toHexString(Objects.hash(address, userAgent));
+        // Android/微信的原生媒体内核会使用与页面请求不同的 User-Agent。
+        // 播放凭证继续绑定当前网络地址，但不再错误地拦截同一手机的媒体分段请求。
+        return Integer.toHexString(Objects.hash(address));
     }
 
     private void applyProtectedVideoHeaders(HttpServletResponse response)
@@ -3889,12 +3892,12 @@ public class CourseApiController
                     {
                         if (intValue(child.get("type")) == 2)
                         {
-                            int count = attemptCount(user, courseId, str(child.get("name")), "");
-                            if (count > 0)
-                            {
-                                child.put("status", "已完成" + count + "次");
-                                child.put("read", count);
-                            }
+                            int count = attemptCountForTitles(user, courseId, "",
+                                str(child.get("name")), str(lesson.get("title")));
+                            child.put("status", count > 0 ? "已完成" + count + "次" : "未完成");
+                            child.put("read", count);
+                            child.put("completedCount", count);
+                            child.put("attemptCount", count);
                         }
                     }
                 }
@@ -3907,14 +3910,19 @@ public class CourseApiController
         for (Map<String, Object> quiz : quizzes)
         {
             int count = attemptCount(user, courseId, str(quiz.get("name")), type);
-            if (count > 0)
-            {
-                quiz.put("status", "已完成" + count + "次");
-            }
+            quiz.put("status", count > 0 ? "已完成" + count + "次" : "未完成");
+            quiz.put("read", count);
+            quiz.put("completedCount", count);
+            quiz.put("attemptCount", count);
         }
     }
 
     private static int attemptCount(Map<String, Object> user, String courseId, String title, String type)
+    {
+        return attemptCountForTitles(user, courseId, type, title);
+    }
+
+    private static int attemptCountForTitles(Map<String, Object> user, String courseId, String type, String... titles)
     {
         int count = 0;
         for (Map<String, Object> attempt : attempts)
@@ -3931,7 +3939,20 @@ public class CourseApiController
             {
                 continue;
             }
-            if (title.length() == 0 || title.equals(str(attempt.get("title"))) || str(attempt.get("title")).contains(title))
+            boolean titleMatched = titles == null || titles.length == 0;
+            String attemptTitle = str(attempt.get("title"));
+            String practiceTitle = str(attempt.get("practiceTitle"));
+            for (String candidate : titles == null ? new String[0] : titles)
+            {
+                String title = str(candidate).trim();
+                if (title.length() == 0 || title.equals(attemptTitle) || attemptTitle.contains(title)
+                    || title.equals(practiceTitle) || practiceTitle.contains(title))
+                {
+                    titleMatched = true;
+                    break;
+                }
+            }
+            if (titleMatched)
             {
                 count++;
             }
@@ -5548,7 +5569,8 @@ public class CourseApiController
     {
         try
         {
-            return LocalDateTime.parse(str(wrong.get("updatedAt"))).isAfter(LocalDateTime.now().minusHours(24));
+            String value = firstNonBlank(wrong.get("updatedAt"), wrong.get("createdAt"));
+            return LocalDateTime.parse(value).toLocalDate().equals(LocalDate.now());
         }
         catch (Exception e)
         {
@@ -6144,6 +6166,23 @@ public class CourseApiController
         return rows;
     }
 
+    private static List<Map<String, Object>> attemptStatsRows(List<Map<String, Object>> userAttempts)
+    {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> attempt : userAttempts)
+        {
+            Map<String, Object> row = new LinkedHashMap<>(attempt);
+            int wrong = Math.max(0, intValue(attempt.get("total")) - intValue(attempt.get("correct")));
+            row.put("wrongCount", wrong);
+            row.put("averageScore", attempt.get("score"));
+            row.put("completedAt", attempt.get("createdAt"));
+            row.put("practiceTime", attempt.get("createdAt"));
+            rows.add(row);
+        }
+        rows.sort((a, b) -> str(b.get("createdAt")).compareTo(str(a.get("createdAt"))));
+        return rows;
+    }
+
     private static List<Map<String, Object>> attemptRowsByType(List<Map<String, Object>> userAttempts, String type)
     {
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -6151,11 +6190,14 @@ public class CourseApiController
         {
             if (type.equals(str(attempt.get("type"))))
             {
-                rows.add(attempt);
+                Map<String, Object> row = new LinkedHashMap<>(attempt);
+                row.put("wrongCount", Math.max(0, intValue(attempt.get("total")) - intValue(attempt.get("correct"))));
+                row.put("completedAt", attempt.get("createdAt"));
+                rows.add(row);
             }
         }
         rows.sort((a, b) -> str(b.get("createdAt")).compareTo(str(a.get("createdAt"))));
-        return rows.size() > 8 ? rows.subList(0, 8) : rows;
+        return rows;
     }
 
     private static Map<String, Object> resolveStudyUser(Map<String, Object> requester, String userId)

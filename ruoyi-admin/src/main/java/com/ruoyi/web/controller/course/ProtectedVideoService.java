@@ -2,9 +2,11 @@ package com.ruoyi.web.controller.course;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -181,11 +183,18 @@ public class ProtectedVideoService
         if (isReady(source)) return;
         File root = protectedRoot();
         File temp = new File(root, ".building-" + key + "-" + UUID.randomUUID().toString().replace("-", ""));
+        File stagedInput = null;
         deleteRecursively(temp);
         if (!temp.mkdirs()) throw new IOException("无法创建安全视频临时目录");
         try
         {
-            String input = ffmpegInput(source);
+            File localInput = resolveLocalVideoFile(source);
+            if (localInput == null && normalizeSource(source).matches("^https?://.+"))
+            {
+                stagedInput = stageRemoteVideo(source, root, key);
+            }
+            String input = localInput != null ? localInput.getCanonicalPath()
+                : (stagedInput != null ? stagedInput.getCanonicalPath() : ffmpegInput(source));
             writeKeyFiles(temp);
             boolean converted = runFfmpeg(input, temp, true);
             if (!converted)
@@ -198,7 +207,7 @@ public class ProtectedVideoService
             File playlist = new File(temp, "index.m3u8");
             if (!converted || !playlist.isFile() || segmentFiles(temp).length == 0)
             {
-                throw new IOException("视频无法转换为安全分段格式");
+                throw new IOException("视频无法转换为安全分段格式" + ffmpegFailure(temp));
             }
             Files.deleteIfExists(new File(temp, "key-info.txt").toPath());
             Files.deleteIfExists(new File(temp, "ffmpeg.log").toPath());
@@ -215,6 +224,48 @@ public class ProtectedVideoService
         finally
         {
             if (temp.exists()) deleteRecursively(temp);
+            if (stagedInput != null) Files.deleteIfExists(stagedInput.toPath());
+        }
+    }
+
+    private File stageRemoteVideo(String source, File root, String key) throws IOException
+    {
+        String value = normalizeSource(source);
+        URLConnection connection = new URL(value).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(180000);
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0 CourseVideoProtector/1.0");
+        long contentLength = connection.getContentLengthLong();
+        if (contentLength > 2L * 1024L * 1024L * 1024L)
+        {
+            throw new IOException("远程视频超过安全转换上限");
+        }
+        File staged = new File(root, ".source-" + key + "-" + UUID.randomUUID().toString().replace("-", "") + ".mp4").getCanonicalFile();
+        try (InputStream input = connection.getInputStream())
+        {
+            Files.copy(input, staged.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (!staged.isFile() || staged.length() < 1024L)
+        {
+            Files.deleteIfExists(staged.toPath());
+            throw new IOException("远程视频下载失败");
+        }
+        return staged;
+    }
+
+    private String ffmpegFailure(File output)
+    {
+        try
+        {
+            File log = new File(output, "ffmpeg.log");
+            if (!log.isFile()) return "";
+            String text = new String(Files.readAllBytes(log.toPath()), StandardCharsets.UTF_8).trim();
+            if (text.length() > 600) text = text.substring(text.length() - 600);
+            return text.length() == 0 ? "" : "：" + text.replace('\n', ' ').replace('\r', ' ');
+        }
+        catch (Exception ignored)
+        {
+            return "";
         }
     }
 
