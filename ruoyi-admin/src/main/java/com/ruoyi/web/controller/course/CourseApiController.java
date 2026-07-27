@@ -3979,7 +3979,12 @@ public class CourseApiController
         }
         if (user != null)
         {
-            Map<String, Object> progress = courseProgressStats(user, str(course.get("id")), intValue(course.get("totalLessons")));
+            Map<String, Object> progress = courseProgressStats(
+                user,
+                str(course.get("id")),
+                intValue(course.get("totalLessons")),
+                collectCourseLessonTitles(course)
+            );
             course.put("readStudyCount", progress.get("readStudyCount"));
             course.put("readDuration", progress.get("readDuration"));
             course.put("progress", progress.get("progress"));
@@ -4261,6 +4266,31 @@ public class CourseApiController
         return titles;
     }
 
+    private static Set<String> collectCourseLessonTitles(Map<String, Object> course)
+    {
+        Set<String> titles = new LinkedHashSet<>();
+        List<Map<String, Object>> versions = mapList(course.get("versions"));
+        int visibleCount = Math.min(2, versions.size());
+        for (int i = 0; i < visibleCount; i++)
+        {
+            titles.addAll(collectVersionLessonTitles(versions.get(i)));
+        }
+        if (!titles.isEmpty())
+        {
+            return titles;
+        }
+        for (Map<String, Object> chapter : mapList(course.get("chapters")))
+        {
+            if (isHidden(chapter))
+            {
+                continue;
+            }
+            collectLessonTitles(mapList(chapter.get("items")), titles);
+            collectLessonTitles(mapList(chapter.get("children")), titles);
+        }
+        return titles;
+    }
+
     private static void collectLessonTitles(List<Map<String, Object>> items, Set<String> titles)
     {
         collectLessonTitles(items, titles, "");
@@ -4295,9 +4325,8 @@ public class CourseApiController
 
     private static Map<String, Object> courseVersionProgressStats(Map<String, Object> user, String courseId, Set<String> lessonTitles, int totalLessons)
     {
-        int learned = 0;
         int seconds = 0;
-        int cumulativeTotal = 0;
+        Set<String> completedLessons = new LinkedHashSet<>();
         for (Map<String, Object> progress : lessonProgress.values())
         {
             if (!sameUser(progress, user) || !courseId.equals(scopedCourseId(progress.get("courseId"))))
@@ -4310,13 +4339,15 @@ public class CourseApiController
                 continue;
             }
             seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
-            cumulativeTotal += progressCumulativePercent(progress);
-            if (progressBestPercent(progress) >= 90)
+            if (lessonStudyCompleted(progress))
             {
-                learned++;
+                completedLessons.add(title);
             }
         }
-        int percent = totalLessons <= 0 ? 0 : Math.max(0, Math.round(cumulativeTotal * 1f / totalLessons));
+        int learned = totalLessons <= 0
+            ? completedLessons.size()
+            : Math.min(totalLessons, completedLessons.size());
+        int percent = totalLessons <= 0 ? 0 : Math.min(100, Math.round(learned * 100f / totalLessons));
         return map("readStudyCount", learned, "readDuration", secondsText(seconds), "progress", percent);
     }
 
@@ -4337,25 +4368,39 @@ public class CourseApiController
             .trim();
     }
 
-    private static Map<String, Object> courseProgressStats(Map<String, Object> user, String courseId, int totalLessons)
+    private static Map<String, Object> courseProgressStats(Map<String, Object> user, String courseId, int totalLessons, Set<String> lessonTitles)
     {
-        int learned = 0;
         int seconds = 0;
-        int cumulativeTotal = 0;
+        Set<String> completedLessons = new LinkedHashSet<>();
         for (Map<String, Object> progress : lessonProgress.values())
         {
             if (!sameUser(progress, user) || !courseId.equals(str(progress.get("courseId"))))
             {
                 continue;
             }
-            seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
-            cumulativeTotal += progressCumulativePercent(progress);
-            if (progressBestPercent(progress) >= 90)
+            String title = normalizedLessonTitle(firstNonBlank(
+                progress.get("sourceLessonTitle"),
+                progress.get("lessonId"),
+                progress.get("lessonTitle"),
+                progress.get("title")
+            ));
+            if (!lessonTitles.isEmpty() && !lessonTitles.contains(title))
             {
-                learned++;
+                continue;
+            }
+            seconds += (int) Math.round(progressTotalWatchedSeconds(progress));
+            if (lessonStudyCompleted(progress))
+            {
+                if (title.length() > 0)
+                {
+                    completedLessons.add(title);
+                }
             }
         }
-        int percent = totalLessons <= 0 ? 0 : Math.max(0, Math.round(cumulativeTotal * 1f / totalLessons));
+        int learned = totalLessons <= 0
+            ? completedLessons.size()
+            : Math.min(totalLessons, completedLessons.size());
+        int percent = totalLessons <= 0 ? 0 : Math.min(100, Math.round(learned * 100f / totalLessons));
         return map("readStudyCount", learned, "readDuration", secondsText(seconds), "progress", percent);
     }
 
@@ -8988,6 +9033,20 @@ public class CourseApiController
             return Math.max(0, Math.round((float) (progressTotalWatchedSeconds(progress) / duration * 100d)));
         }
         return progressBestPercent(progress);
+    }
+
+    private static boolean lessonStudyCompleted(Map<String, Object> progress)
+    {
+        if (progress == null)
+        {
+            return false;
+        }
+        double duration = doubleValue(progress.get("duration"));
+        if (duration > 0d)
+        {
+            return progressTotalWatchedSeconds(progress) + 0.001d >= duration * 0.9d;
+        }
+        return progressCumulativePercent(progress) >= 90;
     }
 
     private static int findRating(String lessonId, Map<String, Object> user)
