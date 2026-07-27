@@ -321,6 +321,11 @@ public class CourseApiController
             {
                 return AjaxResult.error("请输入正确的手机号");
             }
+            String smsCode = str(body.get("smsCode")).trim();
+            if (!smsCode.equals(verificationCodes.get(phone)))
+            {
+                return AjaxResult.error("验证码错误或已过期");
+            }
             for (Map<String, Object> item : users)
             {
                 if (!str(user.get("id")).equals(str(item.get("id"))) && phone.equals(str(item.get("phone"))))
@@ -329,6 +334,7 @@ public class CourseApiController
                 }
             }
             user.put("phone", phone);
+            verificationCodes.remove(phone);
         }
         String rawAvatar = str(body.get("avatar")).trim();
         if (rawAvatar.matches("(?i)^(blob:|file:|wxfile:|data:|https?://tmp).*$"))
