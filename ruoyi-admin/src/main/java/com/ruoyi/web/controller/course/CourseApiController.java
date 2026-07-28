@@ -2684,12 +2684,15 @@ public class CourseApiController
         {
             return AjaxResult.error("未找到对应开通记录");
         }
+        String closedAt = now();
         order.put("status", "closed");
-        order.put("closedAt", now());
+        order.put("closedAt", closedAt);
+        order.put("expiresAt", closedAt);
         closeEnrollmentForOrder(order);
         syncActivationCardFromOrder(order);
         card.put("authorizationClosed", true);
-        card.put("authorizationClosedAt", now());
+        card.put("authorizationClosedAt", closedAt);
+        card.put("expiresAt", closedAt);
         logOperation("激活码管理", card.get("usedByName"), card.get("courseTitle"), "关闭激活码课程授权：" + card.get("code"), "已关闭");
         persistData();
         return AjaxResult.success(card);
@@ -2871,8 +2874,10 @@ public class CourseApiController
         {
             return AjaxResult.error("开通记录不存在");
         }
+        String closedAt = now();
         order.put("status", "closed");
-        order.put("closedAt", now());
+        order.put("closedAt", closedAt);
+        order.put("expiresAt", closedAt);
         closeEnrollmentForOrder(order);
         syncActivationCardFromOrder(order);
         logOperation("授权开通", order.get("userName"), order.get("courseTitle"), "关闭课程权限", "已关闭");
@@ -7886,6 +7891,12 @@ public class CourseApiController
 
     private static void closeEnrollmentForOrder(Map<String, Object> order)
     {
+        String closedAt = firstNonBlank(order == null ? "" : order.get("closedAt"), now());
+        if (order != null)
+        {
+            order.put("closedAt", closedAt);
+            order.put("expiresAt", closedAt);
+        }
         Map<String, Object> enrollment = findById(enrollments, str(order.get("enrollmentId")));
         if (enrollment == null)
         {
@@ -7894,7 +7905,8 @@ public class CourseApiController
         if (enrollment != null)
         {
             enrollment.put("status", "closed");
-            enrollment.put("closedAt", now());
+            enrollment.put("closedAt", closedAt);
+            enrollment.put("expiry", closedAt);
         }
     }
 
@@ -8620,11 +8632,17 @@ public class CourseApiController
             enrollment == null ? "" : enrollment.get("ownerUserId"),
             enrollment == null ? "" : enrollment.get("agencyUserId")
         );
-        String expiresAt = firstNonBlank(
-            order == null ? "" : order.get("expiresAt"),
-            enrollment == null ? "" : enrollment.get("expiry"),
-            card.get("expiresAt")
+        boolean closed = "closed".equals(str(order == null ? "" : order.get("status")))
+            || "closed".equals(str(enrollment == null ? "" : enrollment.get("status")))
+            || Boolean.TRUE.equals(card.get("authorizationClosed"));
+        String closedAt = firstNonBlank(
+            order == null ? "" : order.get("closedAt"),
+            enrollment == null ? "" : enrollment.get("closedAt"),
+            card.get("authorizationClosedAt")
         );
+        String expiresAt = closed
+            ? firstNonBlank(closedAt, order == null ? "" : order.get("expiresAt"), enrollment == null ? "" : enrollment.get("expiry"), card.get("expiresAt"))
+            : firstNonBlank(order == null ? "" : order.get("expiresAt"), enrollment == null ? "" : enrollment.get("expiry"), card.get("expiresAt"));
         String activatedAt = firstNonBlank(
             card.get("activatedAt"),
             order == null ? "" : order.get("activatedAt"),
@@ -8638,11 +8656,20 @@ public class CourseApiController
             user == null ? "" : user.get("name"),
             card.get("studentName")
         );
-        boolean closed = "closed".equals(str(order == null ? "" : order.get("status")))
-            || "closed".equals(str(enrollment == null ? "" : enrollment.get("status")))
-            || Boolean.TRUE.equals(card.get("authorizationClosed"));
-
         boolean changed = false;
+        if (closed && closedAt.length() > 0)
+        {
+            if (order != null)
+            {
+                changed = putIfChanged(order, "expiresAt", closedAt) || changed;
+                changed = putIfChanged(order, "closedAt", closedAt) || changed;
+            }
+            if (enrollment != null)
+            {
+                changed = putIfChanged(enrollment, "expiry", closedAt) || changed;
+                changed = putIfChanged(enrollment, "closedAt", closedAt) || changed;
+            }
+        }
         changed = putIfChanged(card, "status", "used") || changed;
         changed = putIfChanged(card, "courseId", courseId) || changed;
         changed = putIfChanged(card, "ownerUserId", ownerUserId) || changed;
@@ -8662,6 +8689,7 @@ public class CourseApiController
         if (closed)
         {
             changed = putIfChanged(card, "authorizationClosed", true) || changed;
+            changed = putIfChanged(card, "authorizationClosedAt", closedAt) || changed;
         }
         putIfPresent(card, card, "courseId");
         putIfPresent(card, card, "ownerUserId");
