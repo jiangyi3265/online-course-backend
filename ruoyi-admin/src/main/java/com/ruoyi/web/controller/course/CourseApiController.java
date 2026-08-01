@@ -2207,8 +2207,10 @@ public class CourseApiController
     {
         synchronized (storeLock)
         {
+            Map<String, Object> payload = new LinkedHashMap<>(body == null ? Collections.emptyMap() : body);
+            payload.put("updatedAt", now());
             frontendSettings.clear();
-            frontendSettings.putAll(normalizeFrontendSettings(body));
+            frontendSettings.putAll(normalizeFrontendSettings(payload));
             logOperation("前端配置", "后台管理员", "首页与协议", "保存前端展示配置", "已完成");
             persistData();
             return AjaxResult.success(copyFrontendSettings());
@@ -3065,7 +3067,8 @@ public class CourseApiController
     {
         return map(
             "homeBanners", list(defaultHomeBanner()),
-            "agreements", defaultAgreements()
+            "agreements", defaultAgreements(),
+            "updatedAt", now()
         );
     }
 
@@ -3151,7 +3154,13 @@ public class CourseApiController
             agreements.put("privacy", normalizeAgreement("privacy", map.get("privacy"), agreements.get("privacy")));
             agreements.put("user", normalizeAgreement("user", map.get("user"), agreements.get("user")));
         }
-        return map("homeBanners", banners, "agreements", agreements);
+        String settingsUpdatedAt = str(settings.get("updatedAt")).trim();
+        if (settingsUpdatedAt.length() == 0) settingsUpdatedAt = now();
+        return map(
+            "homeBanners", banners,
+            "agreements", agreements,
+            "updatedAt", settingsUpdatedAt
+        );
     }
 
     @SuppressWarnings("unchecked")

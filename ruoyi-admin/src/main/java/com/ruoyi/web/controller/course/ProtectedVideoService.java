@@ -37,6 +37,8 @@ import com.ruoyi.common.config.RuoYiConfig;
 @Component
 public class ProtectedVideoService
 {
+    private static final String CACHE_FORMAT_VERSION = "h264-main-yuv420p-v2";
+    private static final String CACHE_FORMAT_FILE = "format-version.txt";
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> PREPARING = ConcurrentHashMap.newKeySet();
     private static final Map<String, String> FAILURES = new ConcurrentHashMap<>();
@@ -56,7 +58,8 @@ public class ProtectedVideoService
             File directory = cacheDirectory(source);
             return new File(directory, "index.m3u8").isFile()
                 && new File(directory, "key.bin").isFile()
-                && segmentFiles(directory).length > 0;
+                && segmentFiles(directory).length > 0
+                && cacheFormatCurrent(directory);
         }
         catch (Exception ignored)
         {
@@ -196,14 +199,7 @@ public class ProtectedVideoService
             String input = localInput != null ? localInput.getCanonicalPath()
                 : (stagedInput != null ? stagedInput.getCanonicalPath() : ffmpegInput(source));
             writeKeyFiles(temp);
-            boolean converted = runFfmpeg(input, temp, true);
-            if (!converted)
-            {
-                deleteRecursively(temp);
-                if (!temp.mkdirs()) throw new IOException("无法重建安全视频临时目录");
-                writeKeyFiles(temp);
-                converted = runFfmpeg(input, temp, false);
-            }
+            boolean converted = runFfmpeg(input, temp);
             File playlist = new File(temp, "index.m3u8");
             if (!converted || !playlist.isFile() || segmentFiles(temp).length == 0)
             {
@@ -211,6 +207,8 @@ public class ProtectedVideoService
             }
             Files.deleteIfExists(new File(temp, "key-info.txt").toPath());
             Files.deleteIfExists(new File(temp, "ffmpeg.log").toPath());
+            Files.write(new File(temp, CACHE_FORMAT_FILE).toPath(),
+                CACHE_FORMAT_VERSION.getBytes(StandardCharsets.UTF_8));
             if (target.exists()) deleteRecursively(target);
             try
             {
@@ -269,25 +267,22 @@ public class ProtectedVideoService
         }
     }
 
-    private boolean runFfmpeg(String input, File output, boolean copyCodecs) throws Exception
+    private boolean runFfmpeg(String input, File output) throws Exception
     {
         List<String> command = new ArrayList<>(Arrays.asList(
             "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
             "-i", input,
             "-map", "0:v:0?", "-map", "0:a:0?"
         ));
-        if (copyCodecs)
-        {
-            command.addAll(Arrays.asList("-c", "copy"));
-        }
-        else
-        {
-            command.addAll(Arrays.asList(
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*8)"
-            ));
-        }
+        // 始终转成平板和旧版 Android Chrome 都能稳定解码的 H.264/AAC。
+        // 直接复制源编码会让 HEVC/10-bit 视频出现“有声音、无画面”。
+        command.addAll(Arrays.asList(
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+            "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*8)"
+        ));
         command.addAll(Arrays.asList(
             "-f", "hls",
             "-hls_time", "8",
@@ -302,13 +297,28 @@ public class ProtectedVideoService
             .redirectErrorStream(true)
             .redirectOutput(new File(output, "ffmpeg.log"))
             .start();
-        boolean finished = process.waitFor(copyCodecs ? 10L : 30L, TimeUnit.MINUTES);
+        boolean finished = process.waitFor(30L, TimeUnit.MINUTES);
         if (!finished)
         {
             process.destroyForcibly();
             return false;
         }
         return process.exitValue() == 0;
+    }
+
+    private boolean cacheFormatCurrent(File directory)
+    {
+        try
+        {
+            File marker = new File(directory, CACHE_FORMAT_FILE);
+            if (!marker.isFile()) return false;
+            String value = new String(Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim();
+            return CACHE_FORMAT_VERSION.equals(value);
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     private void writeKeyFiles(File output) throws IOException
