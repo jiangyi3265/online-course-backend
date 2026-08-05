@@ -37,7 +37,7 @@ import com.ruoyi.common.config.RuoYiConfig;
 @Component
 public class ProtectedVideoService
 {
-    private static final String CACHE_FORMAT_VERSION = "h264-main-yuv420p-v2";
+    private static final String CACHE_FORMAT_VERSION = "h264-baseline-720p-yuv420p-v3";
     private static final String CACHE_FORMAT_FILE = "format-version.txt";
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> PREPARING = ConcurrentHashMap.newKeySet();
@@ -274,13 +274,14 @@ public class ProtectedVideoService
             "-i", input,
             "-map", "0:v:0?", "-map", "0:a:0?"
         ));
-        // 始终转成平板和旧版 Android Chrome 都能稳定解码的 H.264/AAC。
-        // 直接复制源编码会让 HEVC/10-bit 视频出现“有声音、无画面”。
+        // 始终转成旧款 Android 平板也能稳定解码的 H.264 Baseline/AAC。
+        // 限制为 720p、30fps 和 Level 3.1，避免设备只能解码音轨、画面黑屏。
         command.addAll(Arrays.asList(
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+            "-profile:v", "baseline", "-level:v", "3.1", "-pix_fmt", "yuv420p",
+            "-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-r", "30", "-maxrate", "2800k", "-bufsize", "5600k",
+            "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k", "-ac", "2", "-ar", "44100",
             "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*8)"
         ));
         command.addAll(Arrays.asList(
