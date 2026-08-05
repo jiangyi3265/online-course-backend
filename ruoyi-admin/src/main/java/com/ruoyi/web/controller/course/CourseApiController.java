@@ -124,7 +124,6 @@ public class CourseApiController
         File file = dataFile();
         if (!file.exists())
         {
-            protectedVideoService.prepareSourcesAsync(courses);
             return;
         }
         synchronized (storeLock)
@@ -193,7 +192,9 @@ public class CourseApiController
                 throw new IllegalStateException("读取课程数据失败", e);
             }
         }
-        protectedVideoService.prepareSourcesAsync(courses);
+        // 已有课程的安全视频在首次播放时按需生成。缓存格式升级后若在启动阶段
+        // 把全部视频排入单线程队列，用户正在打开的课程反而会长时间等待。
+        // 新增、编辑课程仍会在对应管理接口中调用 prepareSourcesAsync 预生成。
     }
 
     @PostMapping("/app/login")
