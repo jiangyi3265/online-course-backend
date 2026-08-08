@@ -35,10 +35,15 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -64,11 +69,8 @@ import org.springframework.web.multipart.MultipartFile;
 @RequestMapping("/course")
 public class CourseApiController
 {
-    private static final String SAMPLE_VIDEO_URL = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
     private static final String DATA_FILE_NAME = "course-data.json";
-    private static final Set<String> ALLOWED_TRIAL_SUBJECTS = Collections.unmodifiableSet(
-        new LinkedHashSet<>(Arrays.asList("yuwen", "shuxue", "math", "gaokao-math", "yingyu", "wuli", "huaxue"))
-    );
+    private static final Logger log = LoggerFactory.getLogger(CourseApiController.class);
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final Object storeLock = new Object();
@@ -97,6 +99,8 @@ public class CourseApiController
     private static final Map<String, String> verificationCodes = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> videoStreamTokens = new ConcurrentHashMap<>();
     private static final long VIDEO_STREAM_TOKEN_TTL_MILLIS = 2L * 60L * 60L * 1000L;
+    private static volatile boolean courseDataReady = false;
+    private static volatile String courseDataMessage = "课程数据正在初始化，请稍后重试";
 
     @Value("${ruoyi.profile:}")
     private String profilePath;
@@ -107,27 +111,20 @@ public class CourseApiController
     @Autowired
     private ProtectedVideoService protectedVideoService;
 
-    static
-    {
-        initUsers();
-        initCourses();
-        initDocs();
-        initQuestions();
-        initActivationCodes();
-        initStudyData();
-        initFrontendSettings();
-    }
-
     @PostConstruct
     public void loadPersistedData()
     {
         File file = dataFile();
-        if (!file.exists())
-        {
-            return;
-        }
         synchronized (storeLock)
         {
+            clearCourseData();
+            courseDataReady = false;
+            if (!file.isFile())
+            {
+                courseDataMessage = "课程数据文件不存在，请联系管理员恢复数据";
+                log.error("课程数据文件不存在: {}", file.getAbsolutePath());
+                return;
+            }
             try
             {
                 Map<String, Object> data = objectMapper.readValue(file, new TypeReference<Map<String, Object>>() {});
@@ -154,34 +151,8 @@ public class CourseApiController
                 restoreMap(data, "frontendSettings", frontendSettings);
                 restoreProgress(data);
                 boolean changed = normalizeWrongQuestions();
-                if (ensureFrontendSettings())
-                {
-                    changed = true;
-                }
-                if (ensureBindTestStudent())
-                {
-                    changed = true;
-                }
-                if (removeUnsupportedTrialCourses())
-                {
-                    changed = true;
-                }
-                if (ensureCoreTrialCourses())
-                {
-                    changed = true;
-                }
-                if (ensureGaokaoSupplementCourses())
-                {
-                    changed = true;
-                }
-                if (ensureGaokaoReinforcePoints())
-                {
-                    changed = true;
-                }
-                if (ensureCourseDocDefaults())
-                {
-                    changed = true;
-                }
+                courseDataReady = true;
+                courseDataMessage = "课程数据已就绪";
                 if (changed)
                 {
                     persistData();
@@ -189,12 +160,41 @@ public class CourseApiController
             }
             catch (IOException e)
             {
-                throw new IllegalStateException("读取课程数据失败", e);
+                clearCourseData();
+                courseDataReady = false;
+                courseDataMessage = "课程数据读取失败，请联系管理员检查数据文件";
+                log.error("读取课程数据失败: {}", file.getAbsolutePath(), e);
             }
         }
         // 已有课程的安全视频在首次播放时按需生成。缓存格式升级后若在启动阶段
         // 把全部视频排入单线程队列，用户正在打开的课程反而会长时间等待。
         // 新增、编辑课程仍会在对应管理接口中调用 prepareSourcesAsync 预生成。
+    }
+
+    @ModelAttribute
+    public void ensureCourseDataAvailable(HttpServletRequest request)
+    {
+        String uri = request == null ? "" : str(request.getRequestURI());
+        if (uri.endsWith("/course/app/data-status"))
+        {
+            return;
+        }
+        if (!courseDataReady)
+        {
+            throw new CourseDataUnavailableException(courseDataMessage);
+        }
+    }
+
+    @ExceptionHandler(CourseDataUnavailableException.class)
+    public ResponseEntity<AjaxResult> handleCourseDataUnavailable(CourseDataUnavailableException error)
+    {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(AjaxResult.error(error.getMessage()));
+    }
+
+    @GetMapping("/app/data-status")
+    public AjaxResult courseDataStatus()
+    {
+        return AjaxResult.success(map("ready", courseDataReady, "message", courseDataMessage));
     }
 
     @PostMapping("/app/login")
@@ -270,8 +270,7 @@ public class CourseApiController
         {
             return AjaxResult.error("请输入正确的手机号");
         }
-        verificationCodes.put(phone, "123456");
-        return AjaxResult.success(map("phone", phone, "code", "123456", "message", "演示环境验证码为 123456"));
+        return AjaxResult.error("短信验证码服务尚未配置，请联系管理员");
     }
 
     @PostMapping("/app/password/reset")
@@ -591,7 +590,7 @@ public class CourseApiController
     @GetMapping("/app/study/summary")
     public AjaxResult studySummary()
     {
-        return AjaxResult.success(getStudySummary());
+        return AjaxResult.success(map("sections", new ArrayList<Object>(), "plateScores", new ArrayList<Object>()));
     }
 
     @GetMapping("/app/study/checkins")
@@ -722,7 +721,7 @@ public class CourseApiController
         return AjaxResult.success(map(
             "courseId", scopedCourseId,
             "courseTitle", courseTitle,
-            "summary", getStudySummary(),
+            "summary", map("sections", new ArrayList<Object>(), "plateScores", new ArrayList<Object>()),
             "learningStats", learning,
             "overview", overview,
             "attempts", userAttempts.size() > 8 ? userAttempts.subList(0, 8) : userAttempts,
@@ -743,8 +742,12 @@ public class CourseApiController
     }
 
     @GetMapping("/app/study/plan")
-    public AjaxResult studyPlan(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId)
+    public AjaxResult studyPlan(@RequestParam(required = false, defaultValue = "") String courseId)
     {
+        if (courseId.trim().length() == 0)
+        {
+            return AjaxResult.error("缺少课程编号");
+        }
         for (Map<String, Object> plan : studyPlans)
         {
             if (courseId.equals(plan.get("courseId")))
@@ -752,24 +755,31 @@ public class CourseApiController
                 return AjaxResult.success(plan);
             }
         }
-        return AjaxResult.success(studyPlans.get(0));
+        return AjaxResult.error("当前课程暂无学习计划");
     }
 
     @GetMapping("/app/lesson/video")
     public AjaxResult lessonVideo(@RequestParam String lessonId, @RequestParam(required = false, defaultValue = "") String courseId, HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
+        if (courseId.trim().length() == 0)
+        {
+            return AjaxResult.error("缺少课程编号");
+        }
+        Map<String, Object> course = findCourse(courseId);
+        if (course == null)
+        {
+            return AjaxResult.error("课程不存在或已下架");
+        }
         if (courseId.length() > 0)
         {
-            Map<String, Object> course = findCourse(courseId);
             if (course != null && "full".equals(course.get("kind")) && !hasActiveEnrollment(user, courseId))
             {
                 return AjaxResult.error("权限未开通，请联系授权");
             }
         }
-        String videoUrl = SAMPLE_VIDEO_URL;
-        String poster = "/static/courses/gk-shuxue-full-detail.jpg";
-        Map<String, Object> course = findCourse(courseId);
+        String videoUrl = "";
+        String poster = "";
         Map<String, Object> lessonMeta = null;
         if (course != null)
         {
@@ -793,8 +803,17 @@ public class CourseApiController
             {
                 videoUrl = lessonVideo;
             }
+            String lessonPoster = lessonMeta == null ? "" : firstNonBlank(lessonMeta.get("poster"), lessonMeta.get("posterUrl"), lessonMeta.get("cover"));
+            if (lessonPoster.length() > 0)
+            {
+                poster = lessonPoster;
+            }
         }
         boolean locked = lessonVideoLocked(user, courseId, lessonId);
+        if (!locked && videoUrl.length() == 0)
+        {
+            return AjaxResult.error("本节视频尚未上传，请联系课程管理员");
+        }
         boolean preparing = false;
         String protectionError = "";
         String streamUrl = "";
@@ -825,16 +844,16 @@ public class CourseApiController
         }
         Map<String, Object> data = map(
             "id", lessonId,
-            "title", lessonId,
+            "title", lessonMeta == null ? lessonId : firstNonBlank(lessonMeta.get("title"), lessonMeta.get("name"), lessonId),
             "videoUrl", streamUrl,
             "poster", poster,
             "courseTitle", course == null ? "" : stripCourseYear(course.get("courseName")),
             "chapterTitle", lessonMeta == null ? "" : str(lessonMeta.get("chapterTitle")),
-            "duration", 18,
-            "pageTotal", 1,
-            "prevTitle", lessonId.contains("奇偶") ? "1.集合逻辑不等式" : "",
-            "nextTitle", lessonId.contains("集合") ? "2.奇偶性与单调性" : "下一讲",
-            "card", map("title", "讲点卡", "items", Arrays.asList("先看题目条件，圈出关键词。", "写出对应知识点公式或定义。", "完成例题后进入真题讲练巩固。")),
+            "duration", lessonMeta == null ? 0 : intValue(lessonMeta.get("duration")),
+            "pageTotal", lessonMeta == null ? 0 : intValue(lessonMeta.get("pageTotal")),
+            "prevTitle", lessonMeta == null ? "" : firstNonBlank(lessonMeta.get("prevTitle"), lessonMeta.get("previousTitle")),
+            "nextTitle", lessonMeta == null ? "" : firstNonBlank(lessonMeta.get("nextTitle")),
+            "card", lessonMeta == null ? new LinkedHashMap<String, Object>() : mapValue(lessonMeta.get("card")),
             "progress", lessonProgress.get(progressKey(user, lessonId)),
             "locked", locked,
             "preparing", preparing,
@@ -1465,7 +1484,7 @@ public class CourseApiController
     }
 
     @GetMapping("/app/wrongbook/summary")
-    public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId,
+    public AjaxResult wrongbookSummary(@RequestParam(required = false, defaultValue = "") String courseId,
                                        @RequestParam(required = false, defaultValue = "") String userId,
                                        HttpServletRequest request)
     {
@@ -2001,27 +2020,19 @@ public class CourseApiController
     }
 
     @GetMapping("/app/reinforce")
-    public AjaxResult reinforce(@RequestParam(required = false, defaultValue = "gk-math-full") String courseId)
+    public AjaxResult reinforce(@RequestParam(required = false, defaultValue = "") String courseId)
     {
+        if (courseId.trim().length() == 0)
+        {
+            return AjaxResult.error("缺少课程编号");
+        }
         List<Map<String, Object>> list = new ArrayList<>();
-        boolean changed = false;
-        int index = 0;
         for (Map<String, Object> item : reinforcePoints)
         {
             if (courseId.equals(item.get("courseId")))
             {
-                if (!item.containsKey("testCount"))
-                {
-                    item.put("testCount", defaultReinforceTestCount(index));
-                    changed = true;
-                }
                 list.add(item);
-                index++;
             }
-        }
-        if (changed)
-        {
-            persistData();
         }
         return AjaxResult.success(list);
     }
@@ -2029,7 +2040,7 @@ public class CourseApiController
     @GetMapping("/app/reinforce/practice")
     public AjaxResult reinforcePractice(@RequestParam String pointId)
     {
-        Map<String, Object> point = reinforcePoints.isEmpty() ? null : reinforcePoints.get(0);
+        Map<String, Object> point = null;
         for (Map<String, Object> item : reinforcePoints)
         {
             if (pointId.equals(item.get("id")))
@@ -2037,6 +2048,10 @@ public class CourseApiController
                 point = item;
                 break;
             }
+        }
+        if (point == null)
+        {
+            return AjaxResult.error("知识点不存在或已下架");
         }
         List<String> ids = stringList(point.get("questionIds"));
         List<Map<String, Object>> list = new ArrayList<>();
@@ -2050,27 +2065,10 @@ public class CourseApiController
         return AjaxResult.success(map("title", point.get("title"), "type", "reinforce", "point", point, "questions", publicQuestions(list)));
     }
 
-    private static int defaultReinforceTestCount(int index)
-    {
-        int[] defaults = {3, 5, 2};
-        return defaults[Math.min(Math.max(index, 0), defaults.length - 1)];
-    }
-
     @PostMapping("/app/ai/ask")
     public AjaxResult askAi(@RequestBody Map<String, Object> body)
     {
-        String message = str(body.get("message"));
-        String context = str(body.get("context"));
-        Map<String, Object> chat = map(
-            "id", "chat-" + System.currentTimeMillis(),
-            "context", context,
-            "message", message,
-            "reply", "围绕“" + (context.length() == 0 ? "当前课程" : context) + "”，建议你先定位题目条件，再写出核心公式。你的问题是：" + message + "。可以把卡住的步骤发给我，我会继续拆解。",
-            "createdAt", now()
-        );
-        aiChats.add(chat);
-        persistData();
-        return AjaxResult.success(chat);
+        return AjaxResult.error("AI问答服务尚未配置，请联系管理员");
     }
 
     @PostMapping("/app/authorization/apply")
@@ -3067,22 +3065,9 @@ public class CourseApiController
     private static Map<String, Object> defaultFrontendSettings()
     {
         return map(
-            "homeBanners", list(defaultHomeBanner()),
+            "homeBanners", new ArrayList<Object>(),
             "agreements", defaultAgreements(),
             "updatedAt", now()
-        );
-    }
-
-    private static Map<String, Object> defaultHomeBanner()
-    {
-        return map(
-            "id", "banner-default",
-            "title", "首页主图",
-            "imageUrl", "/static/home-banner.png",
-            "linkUrl", "",
-            "sort", 1,
-            "enabled", true,
-            "remark", "默认首页轮播图"
         );
     }
 
@@ -3092,14 +3077,14 @@ public class CourseApiController
             "privacy", map(
                 "type", "privacy",
                 "title", "隐私政策",
-                "content", "请在后台配置隐私政策内容。",
+                "content", "",
                 "contentFormat", "html",
                 "updatedAt", now()
             ),
             "user", map(
                 "type", "user",
                 "title", "用户协议",
-                "content", "请在后台配置用户协议内容。",
+                "content", "",
                 "contentFormat", "html",
                 "updatedAt", now()
             )
@@ -3140,10 +3125,6 @@ public class CourseApiController
                     "remark", str(banner.get("remark")).trim()
                 ));
             }
-        }
-        if (banners.isEmpty())
-        {
-            banners.add(defaultHomeBanner());
         }
         banners.sort(Comparator.comparingInt(item -> intValue(item.get("sort"))));
 
@@ -3224,205 +3205,42 @@ public class CourseApiController
         }
     }
 
-    private static void initUsers()
+    private static void clearCourseData()
     {
-        users.add(map("phone", "15585827319", "password", "dyr594200", "name", "规划提升邓老师", "id", "33075", "tenantId", 52, "role", "admin", "status", "active"));
-        users.add(map("phone", "13800138000", "password", "123456", "name", "张三", "id", "56596", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
-        users.add(map("phone", "13900139000", "password", "123456", "name", "李五", "id", "56597", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
-        users.add(map("phone", "18888888888", "password", "888888", "name", "王老师", "id", "10001", "tenantId", 52, "role", "teacher", "status", "active"));
-        ensureBindTestStudent();
+        users.clear();
+        courses.clear();
+        enrollments.clear();
+        docs.clear();
+        questions.clear();
+        reinforcePoints.clear();
+        studyPlans.clear();
+        orders.clear();
+        authRequests.clear();
+        activationCodes.clear();
+        favorites.clear();
+        feedbacks.clear();
+        studentBindings.clear();
+        attempts.clear();
+        wrongQuestions.clear();
+        lessonRatings.clear();
+        aiChats.clear();
+        offlineReviews.clear();
+        studyCheckins.clear();
+        operationLogs.clear();
+        frontendSettings.clear();
+        lessonProgress.clear();
+        verificationCodes.clear();
+        videoStreamTokens.clear();
     }
 
-    private static boolean ensureBindTestStudent()
+    private static final class CourseDataUnavailableException extends RuntimeException
     {
-        for (Map<String, Object> user : users)
+        private static final long serialVersionUID = 1L;
+
+        private CourseDataUnavailableException(String message)
         {
-            if ("19078827319".equals(user.get("phone")))
-            {
-                boolean changed = false;
-                if (!"123456".equals(user.get("password")))
-                {
-                    user.put("password", "123456");
-                    changed = true;
-                }
-                if (!"student".equals(user.get("role")))
-                {
-                    user.put("role", "student");
-                    changed = true;
-                }
-                if (!"active".equals(user.get("status")))
-                {
-                    user.put("status", "active");
-                    changed = true;
-                }
-                return changed;
-            }
+            super(message);
         }
-        users.add(map("phone", "19078827319", "password", "123456", "name", "绑定测试学生", "id", "19078827319", "tenantId", 52, "role", "student", "status", "active", "grade", "高三", "region", "贵州贵阳"));
-        return true;
-    }
-
-    private static void initCourses()
-    {
-        courses.add(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文", "/static/courses/zk-yuwen.jpg", 1086, 1));
-        courses.add(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学", "/static/courses/zk-shuxue.jpg", 1456, 2));
-        courses.add(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语", "/static/courses/zk-yingyu.jpg", 1289, 3));
-        courses.add(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理", "/static/courses/zk-wuli.jpg", 1176, 4));
-        courses.add(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学", "/static/courses/zk-huaxue.jpg", 1237, 5));
-        courses.add(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文", "/static/courses/gk-yuwen.jpg", 1078, 6));
-        courses.add(mathTrial());
-        courses.add(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语", "/static/courses/gk-yingyu.jpg", 1360, 8));
-        courses.add(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理", "/static/courses/gk-wuli.jpg", 1121, 9));
-        courses.add(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学", "/static/courses/gk-huaxue.jpg", 980, 10));
-        courses.add(simpleCourse("zk-yuwen-full", "zhongkao", "full", "中考语文", "/static/courses/zk-yuwen.jpg", 438, 11));
-        courses.add(simpleCourse("zk-shuxue-full", "zhongkao", "full", "中考数学", "/static/courses/zk-shuxue.jpg", 521, 12));
-        courses.add(simpleCourse("zk-yingyu-full", "zhongkao", "full", "中考英语", "/static/courses/zk-yingyu.jpg", 487, 13));
-        courses.add(simpleCourse("zk-wuli-full", "zhongkao", "full", "中考物理", "/static/courses/zk-wuli.jpg", 366, 14));
-        courses.add(simpleCourse("zk-huaxue-full", "zhongkao", "full", "中考化学", "/static/courses/zk-huaxue.jpg", 342, 15));
-        courses.add(simpleCourse("gk-yuwen-full", "gaokao", "full", "高考语文", "/static/courses/gk-yuwen.jpg", 406, 16));
-        courses.add(mathFull());
-        courses.add(simpleCourse("gk-yingyu-full", "gaokao", "full", "高考英语", "/static/courses/gk-yingyu-full.jpg", 512, 18));
-        courses.add(simpleCourse("gk-wuli-full", "gaokao", "full", "高考物理", "/static/courses/gk-wuli-full.jpg", 389, 19));
-        courses.add(simpleCourse("gk-huaxue-full", "gaokao", "full", "高考化学", "/static/courses/gk-huaxue.jpg", 318, 20));
-        ensureGaokaoSupplementCourses();
-
-        enrollments.add(map("id", "enr-1", "userId", "56596", "courseId", "zk-yingyu-full", "expiry", "2027-02-15", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-2", "userId", "56596", "courseId", "zk-shuxue-full", "expiry", "2027-02-14", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-3", "userId", "56596", "courseId", "gk-math-full", "expiry", "2027-05-07", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-4", "userId", "56596", "courseId", "gk-yingyu-full", "expiry", "2027-01-27", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-5", "userId", "56596", "courseId", "gk-wuli-full", "expiry", "2027-02-05", "status", "active", "source", "授权", "studentName", "张三", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-6", "userId", "56597", "courseId", "gk-math-full", "expiry", "2027-05-07", "status", "active", "source", "授权", "studentName", "李五", "grade", "高三", "region", "贵州贵阳"));
-        enrollments.add(map("id", "enr-7", "userId", "56597", "courseId", "gk-wuli-full", "expiry", "2027-02-05", "status", "active", "source", "授权", "studentName", "李五", "grade", "高三", "region", "贵州贵阳"));
-    }
-
-    private static boolean ensureGaokaoSupplementCourses()
-    {
-        boolean changed = false;
-        changed |= addCourseIfMissing(simpleCourse("gk-shengwu-full", "gaokao", "full", "高考生物", "/static/courses/gk-huaxue.jpg", 296, 21));
-        changed |= addCourseIfMissing(simpleCourse("gk-lishi-full", "gaokao", "full", "高考历史", "/static/courses/gk-dili-full.jpg", 284, 22));
-        changed |= addCourseIfMissing(simpleCourse("gk-zhengzhi-full", "gaokao", "full", "高考政治", "/static/courses/gk-dili-full.jpg", 271, 23));
-        changed |= addCourseIfMissing(simpleCourse("gk-dili-full", "gaokao", "full", "高考地理", "/static/courses/gk-dili-full.jpg", 302, 24));
-        return changed;
-    }
-
-    private static boolean ensureGaokaoReinforcePoints()
-    {
-        String[] titles = {
-            "根据实际问题选择函数类型", "指数函数图象特征与底数的关系", "指数式与对数式的互化", "分段函数的应用",
-            "复数乘除的模", "复数加减的模", "集合与不等式", "平面向量坐标运算", "函数与导数单调性",
-            "极值点效应", "数列通项公式", "数列求和问题", "三角函数合一变形", "立体几何线面关系",
-            "圆锥曲线焦点弦", "概率与统计分布列", "导数压轴题构造"
-        };
-        String[] pointIds = {
-            "kp-logic", "kp-derivative", "kp-series", "kp-gk-math-4", "kp-gk-math-5", "kp-gk-math-6",
-            "kp-gk-math-7", "kp-gk-math-8", "kp-gk-math-9", "kp-gk-math-10", "kp-gk-math-11",
-            "kp-gk-math-12", "kp-gk-math-13", "kp-gk-math-14", "kp-gk-math-15", "kp-gk-math-16", "kp-gk-math-17"
-        };
-        String[] questionIds = {"q-logic-1", "q-logic-2", "q-derivative-1", "q-series-1", "q-blank-1", "q-blank-2", "q-subjective-1"};
-        boolean changed = false;
-        for (int i = 0; i < titles.length; i++)
-        {
-            String id = pointIds[i];
-            Map<String, Object> existing = findById(reinforcePoints, id);
-            if (existing != null)
-            {
-                if (!titles[i].equals(existing.get("title")))
-                {
-                    existing.put("title", titles[i]);
-                    changed = true;
-                }
-                if (!"gk-math-full".equals(existing.get("courseId")))
-                {
-                    existing.put("courseId", "gk-math-full");
-                    changed = true;
-                }
-                if (str(existing.get("createdAt")).length() == 0)
-                {
-                    existing.put("createdAt", "2026-01-25T19:57:51");
-                    changed = true;
-                }
-                continue;
-            }
-            reinforcePoints.add(map(
-                "id", id,
-                "courseId", "gk-math-full",
-                "title", titles[i],
-                "mastery", Math.max(12, 76 - i * 3),
-                "status", "未学",
-                "testCount", 0,
-                "createdAt", "2026-01-25T19:57:51",
-                "questionIds", Arrays.asList(questionIds[i % questionIds.length])
-            ));
-            changed = true;
-        }
-        return changed;
-    }
-
-    private static boolean ensureCoreTrialCourses()
-    {
-        boolean changed = false;
-        changed |= addCourseIfMissing(simpleCourse("zk-yuwen-trial", "zhongkao", "trial", "中考语文", "/static/courses/zk-yuwen.jpg", 1086, 1));
-        changed |= addCourseIfMissing(simpleCourse("zk-shuxue-trial", "zhongkao", "trial", "中考数学", "/static/courses/zk-shuxue.jpg", 1456, 2));
-        changed |= addCourseIfMissing(simpleCourse("zk-yingyu-trial", "zhongkao", "trial", "中考英语", "/static/courses/zk-yingyu.jpg", 1289, 3));
-        changed |= addCourseIfMissing(simpleCourse("zk-wuli-trial", "zhongkao", "trial", "中考物理", "/static/courses/zk-wuli.jpg", 1176, 4));
-        changed |= addCourseIfMissing(simpleCourse("zk-huaxue-trial", "zhongkao", "trial", "中考化学", "/static/courses/zk-huaxue.jpg", 1237, 5));
-        changed |= addCourseIfMissing(simpleCourse("gk-yuwen-trial", "gaokao", "trial", "高考语文", "/static/courses/gk-yuwen.jpg", 1078, 6));
-        changed |= addCourseIfMissing(mathTrial());
-        changed |= addCourseIfMissing(simpleCourse("gk-yingyu-trial", "gaokao", "trial", "高考英语", "/static/courses/gk-yingyu.jpg", 1360, 8));
-        changed |= addCourseIfMissing(simpleCourse("gk-wuli-trial", "gaokao", "trial", "高考物理", "/static/courses/gk-wuli.jpg", 1121, 9));
-        changed |= addCourseIfMissing(simpleCourse("gk-huaxue-trial", "gaokao", "trial", "高考化学", "/static/courses/gk-huaxue.jpg", 980, 10));
-        return changed;
-    }
-
-    private static boolean removeUnsupportedTrialCourses()
-    {
-        return courses.removeIf(course -> !isAllowedTrialCourse(course));
-    }
-
-    private static boolean isAllowedTrialCourse(Map<String, Object> course)
-    {
-        if (!"trial".equals(course.get("kind")))
-        {
-            return true;
-        }
-        String subject = str(course.get("subject")).trim();
-        if (subject.length() == 0)
-        {
-            subject = str(course.get("id")).trim();
-        }
-        subject = subject.replaceAll("^(zk|gk)-", "").replaceAll("-(trial|full)$", "");
-        return ALLOWED_TRIAL_SUBJECTS.contains(subject);
-    }
-
-    private static boolean addCourseIfMissing(Map<String, Object> course)
-    {
-        if (findCourse(str(course.get("id"))) != null)
-        {
-            return false;
-        }
-        courses.add(course);
-        return true;
-    }
-
-    private static void initDocs()
-    {
-        ensureCourseDocDefaults();
-    }
-
-    private static boolean ensureCourseDocDefaults()
-    {
-        boolean changed = false;
-        changed |= addDocIfMissing(map("id", "doc-1", "courseId", "gk-math-full", "category", "lecture", "title", "高考数学集合逻辑讲义.pdf", "fileUrl", "#", "fileType", "PDF", "size", "1.2MB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
-        changed |= addDocIfMissing(map("id", "doc-2", "courseId", "gk-math-full", "category", "lecture", "title", "导数极值专题学案.pdf", "fileUrl", "#", "fileType", "PDF", "size", "2.4MB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
-        changed |= addDocIfMissing(map("id", "doc-3", "courseId", "zk-yingyu-full", "category", "lecture", "title", "中考英语核心词汇表.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "uploadTime", "2026-05-26T10:11:00", "visible", true));
-        changed |= addDocIfMissing(map("id", "paper-1", "courseId", "gk-math-full", "category", "paper", "title", "高考数学集合逻辑测试卷.pdf", "fileUrl", "#", "fileType", "PDF", "size", "1.2MB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
-        changed |= addDocIfMissing(map("id", "paper-2", "courseId", "gk-math-full", "category", "paper", "title", "导数极值专题测试卷.pdf", "fileUrl", "#", "fileType", "PDF", "size", "2.4MB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
-        changed |= addDocIfMissing(map("id", "paper-3", "courseId", "zk-yingyu-full", "category", "paper", "title", "中考英语核心词汇测试卷.xlsx", "fileUrl", "#", "fileType", "XLSX", "size", "640KB", "uploadTime", "2026-05-26T10:15:00", "visible", true));
-        for (Map<String, Object> doc : docs)
-        {
-            changed |= ensureDocDefaults(doc);
-        }
-        return changed;
     }
 
     private static boolean ensureDocDefaults(Map<String, Object> doc)
@@ -3452,7 +3270,7 @@ public class CourseApiController
         }
         else if (str(doc.get("uploadTime")).length() == 0)
         {
-            doc.put("uploadTime", "paper".equals(doc.get("category")) ? "2026-05-26T10:15:00" : "2026-05-26T10:11:00");
+            doc.put("uploadTime", now());
             changed = true;
         }
         if (!doc.containsKey("visible"))
@@ -3476,188 +3294,6 @@ public class CourseApiController
         return "";
     }
 
-    private static boolean addDocIfMissing(Map<String, Object> doc)
-    {
-        if (findById(docs, str(doc.get("id"))) != null)
-        {
-            return false;
-        }
-        docs.add(doc);
-        return true;
-    }
-
-    private static void initQuestions()
-    {
-        questions.add(map("id", "q-logic-1", "questionType", "choice", "stem", "已知集合 A={x|x>1}，B={x|x<4}，则 A∩B 为", "options", Arrays.asList("x>1", "x<4", "1<x<4", "空集"), "answer", 2, "analysis", "交集要同时满足两个条件，所以是 1<x<4。", "knowledge", "集合交集"));
-        questions.add(map("id", "q-logic-2", "questionType", "choice", "stem", "命题“若 p 则 q”的逆否命题是", "options", Arrays.asList("若 q 则 p", "若非 p 则非 q", "若非 q 则非 p", "p 且 q"), "answer", 2, "analysis", "原命题与逆否命题等价，逆否为若非 q 则非 p。", "knowledge", "充分必要条件"));
-        questions.add(map("id", "q-derivative-1", "questionType", "choice", "stem", "函数 f(x)=x^2 在 x=2 处的导数为", "options", Arrays.asList("2", "3", "4", "5"), "answer", 2, "analysis", "f'(x)=2x，代入 x=2 得 4。", "knowledge", "导数计算"));
-        questions.add(map("id", "q-series-1", "questionType", "choice", "stem", "等差数列首项为 2，公差为 3，则第 5 项为", "options", Arrays.asList("11", "12", "13", "14"), "answer", 3, "analysis", "a5=a1+4d=2+12=14。", "knowledge", "等差数列"));
-        questions.add(map("id", "q-blank-1", "questionType", "fill", "stem", "函数 f(x)=x^2 的导函数是 f'(x)=____。", "options", new ArrayList<Object>(), "answerText", "2x", "acceptableAnswers", Arrays.asList("2x", "2*x"), "analysis", "幂函数求导公式为 (x^n)'=nx^(n-1)，所以 x^2 的导函数是 2x。", "knowledge", "导数计算"));
-        questions.add(map("id", "q-blank-2", "questionType", "fill", "stem", "等差数列通项公式可写为 an=a1+____d。", "options", new ArrayList<Object>(), "answerText", "n-1", "acceptableAnswers", Arrays.asList("n-1", "(n-1)"), "analysis", "等差数列第 n 项比首项多 n-1 个公差。", "knowledge", "等差数列"));
-        questions.add(map("id", "q-subjective-1", "questionType", "subjective", "stem", "简述用导数判断函数单调性的基本步骤。", "options", new ArrayList<Object>(), "answerText", "先求定义域，再求导函数，解 f'(x)>0 和 f'(x)<0 的区间，最后写出对应的增减区间。", "analysis", "主观题重点看步骤完整性：定义域、求导、判符号、写区间。", "knowledge", "导数应用"));
-    }
-
-    private static void initActivationCodes()
-    {
-        activationCodes.add(activationCode("GK-MATH-2026", "gk-math-full", "year", "33075"));
-        activationCodes.add(activationCode("GK-MATH-72H", "gk-math-full", "hours72", "33075"));
-        activationCodes.add(activationCode("GK-MATH-7D", "gk-math-full", "days7", "33075"));
-        activationCodes.add(activationCode("ZK-ENG-2026", "zk-yingyu-full", "year", "33075"));
-        activationCodes.add(activationCode("ZK-ENG-72H", "zk-yingyu-full", "hours72", "33075"));
-        activationCodes.add(activationCode("ZK-ENG-7D", "zk-yingyu-full", "days7", "33075"));
-    }
-
-    private static void initStudyData()
-    {
-        studentBindings.add(map("id", "stu-bind-demo-1", "ownerUserId", "33075", "studentUserId", "56596", "createdAt", now()));
-        studentBindings.add(map("id", "stu-bind-demo-2", "ownerUserId", "33075", "studentUserId", "56597", "createdAt", now()));
-        reinforcePoints.add(map("id", "kp-logic", "courseId", "gk-math-full", "title", "集合与逻辑", "mastery", 68, "status", "待复习", "testCount", 3, "questionIds", Arrays.asList("q-logic-1", "q-logic-2")));
-        reinforcePoints.add(map("id", "kp-derivative", "courseId", "gk-math-full", "title", "导数基础", "mastery", 74, "status", "复习中", "testCount", 5, "questionIds", Arrays.asList("q-derivative-1")));
-        reinforcePoints.add(map("id", "kp-series", "courseId", "gk-math-full", "title", "数列通项", "mastery", 58, "status", "薄弱", "testCount", 2, "questionIds", Arrays.asList("q-series-1")));
-        ensureGaokaoReinforcePoints();
-        studyPlans.add(map("courseId", "gk-math-full", "title", "高考数学阶段学案", "tasks", list(
-            map("id", "plan-1", "title", "复习集合交集与补集", "type", "知识回顾", "done", true),
-            map("id", "plan-2", "title", "完成导数基础 3 道巩固题", "type", "训练任务", "done", false),
-            map("id", "plan-3", "title", "整理错题与巩固中的数列题", "type", "错题复盘", "done", false)
-        )));
-    }
-
-    private static void initFrontendSettings()
-    {
-        frontendSettings.clear();
-        frontendSettings.putAll(defaultFrontendSettings());
-    }
-
-    private static Map<String, Object> mathTrial()
-    {
-        Map<String, Object> course = simpleCourse("gk-math-trial", "gaokao", "trial", "高考数学", "/static/courses/gk-shuxue.jpg", 1450, 7);
-        course.put("subject", "gaokao-math");
-        course.put("title", "高考数学");
-        course.put("courseName", "《高考数学》试听课");
-        course.put("introduction", "《高考数学》试听课");
-        course.put("detailCover", "/static/courses/gk-shuxue-trial-detail.jpg");
-        course.put("updatedAt", "2026-05-26T10:11:00");
-        course.put("totalLessons", 6);
-        course.put("totalDuration", "02小时13分");
-        course.put("practiceDuration", "01小时11分");
-        course.put("readDuration", "00小时41分");
-        course.put("chapters", list(
-            trialChapter("1.集合逻辑不等式", 7),
-            trialChapter("2.奇偶性与单调性", 7),
-            trialChapter("3.周期性与对称性", 6),
-            trialChapter("4.导数——单调性与极值、最值", 6),
-            trialChapter("5.通项公式前n项和", 6),
-            trialChapter("6.定值与定点问题", 2)
-        ));
-        course.put("quizzes", list(makeQuiz("入门测", "未学习", "去测评"), makeQuiz("第六章 数列", "学习中：1/14", "去测评")));
-        return course;
-    }
-
-    private static Map<String, Object> mathFull()
-    {
-        Map<String, Object> course = simpleCourse("gk-math-full", "gaokao", "full", "高考数学", "/static/courses/gk-shuxue-full.jpg", 117, 17);
-        course.put("subject", "gaokao-math");
-        course.put("title", "高考数学");
-        course.put("courseName", "《高考数学》");
-        course.put("introduction", "《高考数学》");
-        course.put("detailCover", "/static/courses/gk-shuxue-full-detail.jpg");
-        course.put("updatedAt", "2026-05-26T10:15:00");
-        course.put("totalLessons", 76);
-        course.put("totalDuration", "04小时53分");
-        course.put("practiceDuration", "22小时00分");
-        course.put("readStudyCount", 1);
-        course.put("readDuration", "00小时21分");
-        course.put("progress", 1);
-        course.put("versions", list(
-            map("name", "2026版", "chapters", list(
-                chapter("一、复数", "1.复数乘除的模（三角法）", "2.复数加减的模（图解法）", "3.速算复数的模运算", "4.零点权重思维"),
-                chapter("二、集合与不等式", "5.集合与不等式（答案反代法）", "6.权方和不等式的应用", "7.万能K法解不等式", "8.对称法解不等式", "9.最大值、最小值与平凡恒等式", "10.充要条件的判断"),
-                chapter("三、平面向量", "11.平面向量三板斧（坐标法）", "12.平面向量三板斧（图解法）", "13.平面向量三板斧（公式法）"),
-                chapter("四、函数与导数", "16.抽象函数（构造法）", "17.抽象函数（赋值法）", "18.抽象函数广义奇偶性（图解法）", "23.极值点效应（保号性定理）", "29.导数邂逅三角函数"),
-                chapter("九、数列", "60.等差数列的计算", "61.等差数列的函数属性", "65.数列求通项问题", "66.数列求和问题")
-            )),
-            map("name", "绝招课", "chapters", list(
-                chapter("一、基础版", "1.集合逻辑不等式", "2.函数的基本概念与表示", "4.奇偶性与单调性", "8.导数——单调性与极值、最值", "12.通项公式与前n项和"),
-                chapter("二、进阶版", "32.导函数构造不等式", "33.端点效应解题大招", "41.不等式速刷", "45.数列不动点求通项大招")
-            ))
-        ));
-        course.put("quizzes", list(
-            makeQuiz("入门测", "学习中：0/20", "去测评"),
-            makeQuiz("第一章 集合、常用逻辑用语、不等式", "学习中：0/15", "去测评"),
-            makeQuiz("第二章 函数的概念及其表示", "已完成", "测评报告"),
-            makeQuiz("第三章 导数", "已完成", "测评报告"),
-            makeQuiz("第六章 数列", "未学习", "去测评")
-        ));
-        return course;
-    }
-
-    private static Map<String, Object> simpleCourse(String id, String stage, String kind, String full, String cover, int studyCount, int sort)
-    {
-        String displayFull = stripCourseYear(full);
-        List<Map<String, Object>> trialChapters = new ArrayList<>();
-        if ("trial".equals(kind))
-        {
-            trialChapters = list(
-                trialChapter(displayFull + "导学试听", 5),
-                trialChapter(displayFull + "核心技巧试听", 5),
-                trialChapter(displayFull + "真题讲练试听", 5)
-            );
-        }
-        return map(
-            "id", id,
-            "stage", stage,
-            "kind", kind,
-            "subject", id.replaceAll("-(trial|full)$", ""),
-            "full", displayFull,
-            "title", displayFull,
-            "courseName", "trial".equals(kind) ? "《" + displayFull + "》试听课" : "《" + displayFull + "》",
-            "introduction", "trial".equals(kind) ? "《" + displayFull + "》试听课" : "《" + displayFull + "》",
-            "cover", cover,
-            "detailCover", cover,
-            "updatedAt", "trial".equals(kind) ? "2026-05-26T10:11:00" : "2026-05-26T10:15:00",
-            "openMode", "trial".equals(kind) ? "trial" : "card",
-            "openText", "trial".equals(kind) ? "试听免费" : "激活课程",
-            "studyCount", studyCount,
-            "totalLessons", "trial".equals(kind) ? 3 : 105,
-            "totalDuration", "trial".equals(kind) ? "01小时29分" : "20小时37分",
-            "practiceDuration", "trial".equals(kind) ? "" : "02小时23分",
-            "readStudyCount", 0,
-            "readDuration", "00小时00分",
-            "progress", 0,
-            "sort", sort,
-            "status", "published",
-            "versions", list(map("name", "2026版", "chapters", trialChapters)),
-            "chapters", trialChapters,
-            "quizzes", list(makeQuiz("入门测", "未学习", "去测评"))
-        );
-    }
-
-    private static Map<String, Object> trialChapter(String title, int practiceTotal)
-    {
-        return map("title", title, "open", true, "audition", true, "children", list(
-            map("name", "技巧干货", "type", 1, "total", 1, "read", 0),
-            map("name", "真题讲练", "type", 2, "total", practiceTotal, "read", 0)
-        ));
-    }
-
-    private static Map<String, Object> chapter(String title, String... lessonNames)
-    {
-        List<Map<String, Object>> items = new ArrayList<>();
-        for (int i = 0; i < lessonNames.length; i++)
-        {
-            items.add(map("title", lessonNames[i], "open", false, "children", list(
-                map("name", "技巧干货", "type", 1, "total", 1, "read", i == 0 ? 1 : 0),
-                map("name", "真题讲练", "type", 2, "total", i + 2, "read", 0)
-            )));
-        }
-        return map("title", title, "open", false, "items", items);
-    }
-
-    private static Map<String, Object> makeQuiz(String name, String status, String action)
-    {
-        return map("name", name, "status", status, "action", action);
-    }
-
     private static List<Map<String, Object>> filteredCourses(Map<String, String> params)
     {
         List<Map<String, Object>> list = new ArrayList<>();
@@ -3667,10 +3303,6 @@ public class CourseApiController
         String status = params.get("status");
         for (Map<String, Object> course : courses)
         {
-            if (!isAllowedTrialCourse(course))
-            {
-                continue;
-            }
             if (tab != null && tab.length() > 0)
             {
                 int index = Integer.parseInt(tab);
@@ -6048,7 +5680,7 @@ public class CourseApiController
             return title;
         }
         title = resolveCourseTitle(attempt.get("courseId"));
-        return title.length() == 0 ? "高考数学" : title;
+        return title.length() == 0 ? "课程" : title;
     }
 
     private static String displaySubjectTitle(Map<String, Object> attempt)
@@ -6059,38 +5691,6 @@ public class CourseApiController
             return title;
         }
         return resolveSubjectTitle(attempt.get("courseId"));
-    }
-
-    private static Map<String, Object> getStudySummary()
-    {
-        return map(
-            "sections", list(
-                map("title", "章节扫雷", "items", list(map("label", "刷题数", "value", "186道"), map("label", "正确", "value", "142道"), map("label", "正确率", "value", "76%"), map("label", "平均得分", "value", "78分"))),
-                map("title", "章节测评", "items", list(map("label", "测评次数", "value", "18次"), map("label", "平均得分", "value", "77分")), "details", list(
-                    map("title", "集合", "count", "测试次数8次", "score", "平均74分", "records", list(
-                        map("name", "入门测", "result", "正确14题，错误6题", "score", "72分"),
-                        map("name", "章节测试", "result", "正确16题，错误4题", "score", "76分")
-                    )),
-                    map("title", "数列", "count", "测试次数10次", "score", "平均80分", "records", list(
-                        map("name", "通项公式", "result", "正确17题，错误3题", "score", "82分"),
-                        map("name", "求和训练", "result", "正确15题，错误5题", "score", "78分")
-                    ))
-                )),
-                map("title", "复习加强统计", "items", list(map("label", "复习课程完成情况", "value", "68%"), map("label", "测评统计", "value", "完成6次，平均72分")), "details", list(
-                    map("title", "第1次复习试卷", "count", "完成", "score", "70分", "records", list(map("name", "错题复盘", "result", "正确12题，错误5题", "score", "70分"))),
-                    map("title", "第2次复习试卷", "count", "完成", "score", "74分", "records", list(map("name", "综合测试", "result", "正确15题，错误4题", "score", "74分")))
-                )),
-                map("title", "思维技巧", "items", list(map("label", "英语完成度", "value", "30%"), map("label", "训练做题", "value", "96道"), map("label", "正确", "value", "73道"), map("label", "错误", "value", "23道"), map("label", "平均得分", "value", "76分"))),
-                map("title", "英语外语科目", "items", list(map("label", "单词完成数量", "value", "428个"), map("label", "今日完成", "value", "36个")))
-            ),
-            "plateScores", list(
-                plate("章节扫雷", 78),
-                plate("章节测评", 74),
-                plate("复习情况", 62),
-                plate("思维技巧", 86),
-                plate("真题讲练", 58)
-            )
-        );
     }
 
     private static Map<String, Object> learningStats(Map<String, Object> user, String courseId)
@@ -7713,19 +7313,6 @@ public class CourseApiController
         }
     }
 
-    private static String cardCourseId(String code)
-    {
-        if ("GK-MATH-2026".equals(code))
-        {
-            return "gk-math-full";
-        }
-        if ("ZK-ENG-2026".equals(code))
-        {
-            return "zk-yingyu-full";
-        }
-        return "";
-    }
-
     private static void updateEnrollmentFromOrder(Map<String, Object> order)
     {
         Map<String, Object> enrollment = findById(enrollments, str(order.get("enrollmentId")));
@@ -8993,8 +8580,7 @@ public class CourseApiController
 
     private static String scopedCourseId(Object courseId)
     {
-        String value = str(courseId).trim();
-        return value.length() == 0 ? "gk-math-full" : value;
+        return str(courseId).trim();
     }
 
     private static boolean ensureWrongCourseMeta(Map<String, Object> wrong)
@@ -9127,11 +8713,6 @@ public class CourseApiController
         return result;
     }
 
-    private static Map<String, Object> plate(String name, int score)
-    {
-        return map("name", name, "score", score, "level", score >= 85 ? map("label", "优秀", "color", "purple") : score >= 75 ? map("label", "良好", "color", "green") : score >= 60 ? map("label", "中等", "color", "yellow") : map("label", "薄弱", "color", "red"));
-    }
-
     private static void syncCourseIntroFields(Map<String, Object> course)
     {
         if (course == null)
@@ -9165,37 +8746,15 @@ public class CourseApiController
         }
         if (!course.containsKey("versions"))
         {
-            course.put("versions", list(map("name", "2026版", "chapters", new ArrayList<Object>())));
+            course.put("versions", new ArrayList<Object>());
         }
-        List<Map<String, Object>> versions = mapList(course.get("versions"));
-        while (versions.size() < 3)
-        {
-            String name = versions.size() == 1 ? "绝招课" : "知识巩固";
-            versions.add(map("name", name, "chapters", new ArrayList<Object>()));
-        }
-        course.put("versions", versions);
         if (!course.containsKey("chapters"))
         {
             course.put("chapters", new ArrayList<Object>());
         }
-        if ("trial".equals(course.get("kind")) && countUploadedCourseLessons(course) == 0)
-        {
-            String title = str(course.get("title"));
-            if (title.length() == 0)
-            {
-                title = str(course.get("full"));
-            }
-            List<Map<String, Object>> trialChapters = list(
-                trialChapter(title + "导学试听", 5),
-                trialChapter(title + "核心技巧试听", 5),
-                trialChapter(title + "真题讲练试听", 5)
-            );
-            course.put("versions", list(map("name", "2026版", "chapters", trialChapters)));
-            course.put("chapters", trialChapters);
-        }
         if (!course.containsKey("quizzes"))
         {
-            course.put("quizzes", list(makeQuiz("入门测", "未学习", "去测评")));
+            course.put("quizzes", new ArrayList<Object>());
         }
         if (!course.containsKey("knowledgeQuizzes"))
         {
