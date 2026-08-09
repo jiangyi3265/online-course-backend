@@ -819,7 +819,7 @@ public class CourseApiController
         String streamUrl = "";
         if (!locked)
         {
-            if (protectedVideoService.isReady(videoUrl))
+            if (protectedVideoService.isPlayable(videoUrl))
             {
                 String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
                 streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
@@ -830,7 +830,7 @@ public class CourseApiController
                 if (protectionError.length() == 0)
                 {
                     protectedVideoService.prepareAsync(videoUrl);
-                    if (protectedVideoService.isReady(videoUrl))
+                    if (protectedVideoService.isPlayable(videoUrl))
                     {
                         String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
                         streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
@@ -859,7 +859,7 @@ public class CourseApiController
             "preparing", preparing,
             "protectionMode", locked ? "" : "hls-aes-128",
             "protectionError", protectionError,
-            "retryAfterSeconds", preparing ? 3 : 0,
+            "retryAfterSeconds", preparing ? 2 : 0,
             "lockReason", locked ? "请按课程顺序学习：完成上一节视频（达95%）及其配套练习后，再解锁本节。" : ""
         );
         return AjaxResult.success(data);

@@ -40,10 +40,18 @@ public class ProtectedVideoService
     private static final String CACHE_FORMAT_VERSION = "h264-baseline-720p-yuv420p-v3";
     private static final String CACHE_FORMAT_FILE = "format-version.txt";
     private static final SecureRandom RANDOM = new SecureRandom();
-    private static final Set<String> PREPARING = ConcurrentHashMap.newKeySet();
+    private static final Set<String> ACTIVE = ConcurrentHashMap.newKeySet();
+    private static final Set<String> INTERACTIVE_QUEUED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> PREWARM_QUEUED = ConcurrentHashMap.newKeySet();
+    private static final Map<String, File> ACTIVE_DIRECTORIES = new ConcurrentHashMap<>();
     private static final Map<String, String> FAILURES = new ConcurrentHashMap<>();
-    private static final ExecutorService CONVERTER = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "course-protected-video-converter");
+    private static final ExecutorService INTERACTIVE_CONVERTER = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "course-video-interactive-converter");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private static final ExecutorService PREWARM_CONVERTER = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "course-video-prewarm-converter");
         thread.setDaemon(true);
         return thread;
     });
@@ -71,7 +79,8 @@ public class ProtectedVideoService
     {
         try
         {
-            return PREPARING.contains(cacheKey(source));
+            String key = cacheKey(source);
+            return ACTIVE.contains(key) || INTERACTIVE_QUEUED.contains(key) || PREWARM_QUEUED.contains(key);
         }
         catch (Exception ignored)
         {
@@ -93,16 +102,38 @@ public class ProtectedVideoService
 
     public void prepareAsync(String source)
     {
+        schedule(source, true);
+    }
+
+    public void prepareSourcesAsync(Object value)
+    {
+        collectVideoSources(value, "").forEach(source -> schedule(source, false));
+    }
+
+    /**
+     * A lesson opened by a student must not wait behind a whole course of
+     * background pre-warm jobs. Interactive and pre-warm conversions therefore
+     * have independent workers; ACTIVE still prevents the same source from
+     * being converted twice.
+     */
+    private void schedule(String source, boolean interactive)
+    {
         String value = normalizeSource(source);
         if (value.length() == 0 || isReady(value)) return;
         try
         {
             String key = cacheKey(value);
-            if (!PREPARING.add(key)) return;
-            FAILURES.remove(key);
-            CONVERTER.submit(() -> {
+            Set<String> queued = interactive ? INTERACTIVE_QUEUED : PREWARM_QUEUED;
+            ExecutorService executor = interactive ? INTERACTIVE_CONVERTER : PREWARM_CONVERTER;
+            if (!queued.add(key)) return;
+            if (interactive) FAILURES.remove(key);
+            executor.submit(() -> {
+                boolean ownsConversion = false;
                 try
                 {
+                    if (isReady(value)) return;
+                    ownsConversion = ACTIVE.add(key);
+                    if (!ownsConversion) return;
                     generate(value, key);
                     FAILURES.remove(key);
                 }
@@ -113,7 +144,8 @@ public class ProtectedVideoService
                 }
                 finally
                 {
-                    PREPARING.remove(key);
+                    if (ownsConversion) ACTIVE.remove(key);
+                    queued.remove(key);
                 }
             });
         }
@@ -123,14 +155,32 @@ public class ProtectedVideoService
         }
     }
 
-    public void prepareSourcesAsync(Object value)
+    /**
+     * A growing EVENT playlist is playable as soon as two encrypted segments
+     * exist. The remaining video continues converting in the background.
+     */
+    public boolean isPlayable(String source)
     {
-        collectVideoSources(value, "").forEach(this::prepareAsync);
+        try
+        {
+            if (isReady(source)) return true;
+            File directory = ACTIVE_DIRECTORIES.get(cacheKey(source));
+            if (directory == null || !directory.isDirectory()) return false;
+            File playlist = new File(directory, "index.m3u8");
+            File key = new File(directory, "key.bin");
+            return playlist.isFile() && playlist.length() > 32L
+                && key.isFile() && key.length() == 16L
+                && segmentFiles(directory).length >= 2;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     public String protectedPlaylist(String source, String token) throws IOException
     {
-        File playlist = new File(cacheDirectory(source), "index.m3u8");
+        File playlist = new File(playbackDirectory(source), "index.m3u8");
         if (!playlist.isFile()) throw new IOException("安全视频清单尚未生成");
         String encodedToken = encode(token);
         String keyUrl = "/course/app/lesson/key.bin?token=" + encodedToken;
@@ -168,7 +218,7 @@ public class ProtectedVideoService
     {
         String safeName = name == null ? "" : new File(name.replace('\\', '/')).getName();
         if (!safeName.matches("^seg_[0-9]{5,8}\\.ts$")) return null;
-        File directory = cacheDirectory(source).getCanonicalFile();
+        File directory = playbackDirectory(source).getCanonicalFile();
         File target = new File(directory, safeName).getCanonicalFile();
         String prefix = directory.getPath().endsWith(File.separator) ? directory.getPath() : directory.getPath() + File.separator;
         return target.getPath().startsWith(prefix) && target.isFile() ? target : null;
@@ -176,7 +226,7 @@ public class ProtectedVideoService
 
     public File keyFile(String source) throws IOException
     {
-        File key = new File(cacheDirectory(source), "key.bin").getCanonicalFile();
+        File key = new File(playbackDirectory(source), "key.bin").getCanonicalFile();
         return key.isFile() && key.length() == 16L ? key : null;
     }
 
@@ -189,6 +239,7 @@ public class ProtectedVideoService
         File stagedInput = null;
         deleteRecursively(temp);
         if (!temp.mkdirs()) throw new IOException("无法创建安全视频临时目录");
+        ACTIVE_DIRECTORIES.put(key, temp);
         try
         {
             File localInput = resolveLocalVideoFile(source);
@@ -221,6 +272,7 @@ public class ProtectedVideoService
         }
         finally
         {
+            ACTIVE_DIRECTORIES.remove(key, temp);
             if (temp.exists()) deleteRecursively(temp);
             if (stagedInput != null) Files.deleteIfExists(stagedInput.toPath());
         }
@@ -282,14 +334,14 @@ public class ProtectedVideoService
             "-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-r", "30", "-maxrate", "2800k", "-bufsize", "5600k",
             "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k", "-ac", "2", "-ar", "44100",
-            "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*8)"
+            "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*6)"
         ));
         command.addAll(Arrays.asList(
             "-f", "hls",
-            "-hls_time", "8",
+            "-hls_time", "6",
             "-hls_list_size", "0",
-            "-hls_playlist_type", "vod",
-            "-hls_flags", "independent_segments",
+            "-hls_playlist_type", "event",
+            "-hls_flags", "independent_segments+temp_file",
             "-hls_key_info_file", new File(output, "key-info.txt").getAbsolutePath(),
             "-hls_segment_filename", new File(output, "seg_%05d.ts").getAbsolutePath(),
             new File(output, "index.m3u8").getAbsolutePath()
@@ -350,6 +402,14 @@ public class ProtectedVideoService
     private File cacheDirectory(String source) throws IOException
     {
         return new File(protectedRoot(), cacheKey(source)).getCanonicalFile();
+    }
+
+    private File playbackDirectory(String source) throws IOException
+    {
+        File ready = cacheDirectory(source);
+        if (isReady(source)) return ready;
+        File active = ACTIVE_DIRECTORIES.get(cacheKey(source));
+        return active != null && active.isDirectory() ? active : ready;
     }
 
     private File protectedRoot() throws IOException
