@@ -37,8 +37,13 @@ import com.ruoyi.common.config.RuoYiConfig;
 @Component
 public class ProtectedVideoService
 {
-    private static final String CACHE_FORMAT_VERSION = "h264-baseline-720p-yuv420p-v3";
+    // Bump this whenever the encoder or HLS layout changes. Without a new
+    // version marker, an old (and potentially tablet-incompatible) cache keeps
+    // being served even after the conversion settings have been fixed.
+    private static final String CACHE_FORMAT_VERSION = "h264-baseline-720p-yuv420p-hls4-v4";
     private static final String CACHE_FORMAT_FILE = "format-version.txt";
+    private static final int HLS_SEGMENT_SECONDS = 4;
+    private static final int MIN_PLAYABLE_SEGMENTS = 1;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> ACTIVE = ConcurrentHashMap.newKeySet();
     private static final Set<String> INTERACTIVE_QUEUED = ConcurrentHashMap.newKeySet();
@@ -66,6 +71,7 @@ public class ProtectedVideoService
             File directory = cacheDirectory(source);
             return new File(directory, "index.m3u8").isFile()
                 && new File(directory, "key.bin").isFile()
+                && new File(directory, "key.bin").length() == 16L
                 && segmentFiles(directory).length > 0
                 && cacheFormatCurrent(directory);
         }
@@ -156,8 +162,9 @@ public class ProtectedVideoService
     }
 
     /**
-     * A growing EVENT playlist is playable as soon as two encrypted segments
-     * exist. The remaining video continues converting in the background.
+     * A growing EVENT playlist is playable as soon as its first encrypted
+     * segment is complete. The remaining video continues converting in the
+     * background, so a long lesson does not block first playback.
      */
     public boolean isPlayable(String source)
     {
@@ -170,7 +177,7 @@ public class ProtectedVideoService
             File key = new File(directory, "key.bin");
             return playlist.isFile() && playlist.length() > 32L
                 && key.isFile() && key.length() == 16L
-                && segmentFiles(directory).length >= 2;
+                && completedPlaylistSegments(directory, playlist) >= MIN_PLAYABLE_SEGMENTS;
         }
         catch (Exception ignored)
         {
@@ -234,6 +241,10 @@ public class ProtectedVideoService
     {
         File target = cacheDirectory(source);
         if (isReady(source)) return;
+        // The old cache is not usable by this version. Remove it before
+        // transcoding so upgrading the format does not temporarily require
+        // roughly twice the video storage on smaller server disks.
+        if (target.exists()) deleteRecursively(target);
         File root = protectedRoot();
         File temp = new File(root, ".building-" + key + "-" + UUID.randomUUID().toString().replace("-", ""));
         File stagedInput = null;
@@ -324,7 +335,10 @@ public class ProtectedVideoService
         List<String> command = new ArrayList<>(Arrays.asList(
             "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
             "-i", input,
-            "-map", "0:v:0?", "-map", "0:a:0?"
+            // A protected lesson must contain a real video stream. Optional
+            // video mapping can silently create an audio-only HLS playlist,
+            // which browsers present as a permanent black screen.
+            "-map", "0:v:0", "-map", "0:a:0?"
         ));
         // 始终转成旧款 Android 平板也能稳定解码的 H.264 Baseline/AAC。
         // 限制为 720p、30fps 和 Level 3.1，避免设备只能解码音轨、画面黑屏。
@@ -334,11 +348,11 @@ public class ProtectedVideoService
             "-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-r", "30", "-maxrate", "2800k", "-bufsize", "5600k",
             "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k", "-ac", "2", "-ar", "44100",
-            "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*6)"
+            "-sc_threshold", "0", "-force_key_frames", "expr:gte(t,n_forced*" + HLS_SEGMENT_SECONDS + ")"
         ));
         command.addAll(Arrays.asList(
             "-f", "hls",
-            "-hls_time", "6",
+            "-hls_time", String.valueOf(HLS_SEGMENT_SECONDS),
             "-hls_list_size", "0",
             "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments+temp_file",
@@ -492,6 +506,28 @@ public class ProtectedVideoService
     {
         File[] files = directory.listFiles(file -> file.isFile() && file.getName().matches("^seg_[0-9]{5,8}\\.ts$"));
         return files == null ? new File[0] : files;
+    }
+
+    private static int completedPlaylistSegments(File directory, File playlist)
+    {
+        try
+        {
+            int count = 0;
+            for (String rawLine : Files.readAllLines(playlist.toPath(), StandardCharsets.UTF_8))
+            {
+                String line = rawLine.trim();
+                if (line.length() == 0 || line.startsWith("#")) continue;
+                String name = new File(line.replace('\\', '/')).getName();
+                if (!name.matches("^seg_[0-9]{5,8}\\.ts$")) continue;
+                File segment = new File(directory, name);
+                if (segment.isFile() && segment.length() > 0L) count += 1;
+            }
+            return count;
+        }
+        catch (Exception ignored)
+        {
+            return 0;
+        }
     }
 
     private static void deleteRecursively(File target) throws IOException
