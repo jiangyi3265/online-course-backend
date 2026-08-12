@@ -111,6 +111,19 @@ public class ProtectedVideoService
         schedule(source, true);
     }
 
+    public void retryAsync(String source)
+    {
+        try
+        {
+            FAILURES.remove(cacheKey(source));
+        }
+        catch (Exception ignored)
+        {
+            // schedule() will report an invalid source in the normal way.
+        }
+        schedule(source, true);
+    }
+
     public void prepareSourcesAsync(Object value)
     {
         collectVideoSources(value, "").forEach(source -> schedule(source, false));

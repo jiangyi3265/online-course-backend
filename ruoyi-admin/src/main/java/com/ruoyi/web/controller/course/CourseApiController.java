@@ -759,7 +759,15 @@ public class CourseApiController
     }
 
     @GetMapping("/app/lesson/video")
-    public AjaxResult lessonVideo(@RequestParam String lessonId, @RequestParam(required = false, defaultValue = "") String courseId, HttpServletRequest request)
+    public AjaxResult lessonVideo(
+        @RequestParam String lessonId,
+        @RequestParam(required = false, defaultValue = "") String courseId,
+        @RequestParam(required = false, defaultValue = "-1") int versionIndex,
+        @RequestParam(required = false, defaultValue = "-1") int chapterIndex,
+        @RequestParam(required = false, defaultValue = "-1") int lessonIndex,
+        @RequestParam(required = false, defaultValue = "-1") int childIndex,
+        @RequestParam(required = false, defaultValue = "0") int retry,
+        HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
         if (courseId.trim().length() == 0)
@@ -797,7 +805,11 @@ public class CourseApiController
             {
                 poster = coursePoster;
             }
-            lessonMeta = findLessonMeta(lessonId, courseId);
+            lessonMeta = findLessonMetaByPosition(course, versionIndex, chapterIndex, lessonIndex, childIndex);
+            if (lessonMeta == null)
+            {
+                lessonMeta = findLessonMeta(lessonId, courseId);
+            }
             String lessonVideo = lessonMeta == null ? "" : str(lessonMeta.get("videoUrl")).trim();
             if (lessonVideo.length() > 0)
             {
@@ -819,6 +831,10 @@ public class CourseApiController
         String streamUrl = "";
         if (!locked)
         {
+            if (retry > 0)
+            {
+                protectedVideoService.retryAsync(videoUrl);
+            }
             if (protectedVideoService.isPlayable(videoUrl))
             {
                 String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
@@ -6898,6 +6914,69 @@ public class CourseApiController
             "courseTitle", course == null ? stripCourseYear(body.get("courseTitle")) : stripCourseYear(course.get("courseName")),
             "subjectTitle", course == null ? str(body.get("courseTitle")) : str(course.get("title")),
             "chapterTitle", chapterTitle.length() == 0 ? "未归类章节" : chapterTitle
+        );
+    }
+
+    private static Map<String, Object> findLessonMetaByPosition(
+        Map<String, Object> course,
+        int versionIndex,
+        int chapterIndex,
+        int lessonIndex,
+        int childIndex)
+    {
+        if (course == null || versionIndex < 0 || chapterIndex < 0 || lessonIndex < 0)
+        {
+            return null;
+        }
+        List<Map<String, Object>> versions = mapList(course.get("versions"));
+        if (versionIndex >= versions.size())
+        {
+            return null;
+        }
+        List<Map<String, Object>> chapters = mapList(versions.get(versionIndex).get("chapters"));
+        if (chapterIndex >= chapters.size())
+        {
+            return null;
+        }
+        Map<String, Object> chapter = chapters.get(chapterIndex);
+        if (isHidden(chapter))
+        {
+            return null;
+        }
+        List<Map<String, Object>> lessons = mapList(chapter.get("items"));
+        if (lessonIndex >= lessons.size())
+        {
+            return null;
+        }
+        Map<String, Object> lesson = lessons.get(lessonIndex);
+        if (isHidden(lesson))
+        {
+            return null;
+        }
+        Map<String, Object> selected = lesson;
+        if (childIndex >= 0)
+        {
+            List<Map<String, Object>> children = mapList(lesson.get("children"));
+            if (childIndex >= children.size() || isHidden(children.get(childIndex)))
+            {
+                return null;
+            }
+            selected = children.get(childIndex);
+        }
+        String videoUrl = lessonVideoUrl(selected);
+        if (videoUrl.length() == 0 && selected != lesson)
+        {
+            videoUrl = lessonVideoUrl(lesson);
+        }
+        return map(
+            "course", course,
+            "courseId", course.get("id"),
+            "chapterTitle", chapter.get("title"),
+            "title", firstNonBlank(selected.get("title"), selected.get("name"), lesson.get("title")),
+            "videoUrl", videoUrl,
+            "poster", firstNonBlank(selected.get("poster"), selected.get("posterUrl"), selected.get("cover")),
+            "duration", intValue(selected.get("duration")),
+            "pageTotal", intValue(selected.get("pageTotal"))
         );
     }
 
