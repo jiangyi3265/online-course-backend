@@ -3,6 +3,8 @@ package com.ruoyi.web.controller.course;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
@@ -25,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import com.ruoyi.common.config.RuoYiConfig;
@@ -50,6 +53,9 @@ public class ProtectedVideoService
     private static final Set<String> PREWARM_QUEUED = ConcurrentHashMap.newKeySet();
     private static final Map<String, File> ACTIVE_DIRECTORIES = new ConcurrentHashMap<>();
     private static final Map<String, String> FAILURES = new ConcurrentHashMap<>();
+    private static final Map<String, Integer> DURATIONS = new ConcurrentHashMap<>();
+    private static final Map<String, Long> DURATION_RETRY_AFTER = new ConcurrentHashMap<>();
+    private static final Set<String> DURATION_PROBES = ConcurrentHashMap.newKeySet();
     private static final ExecutorService INTERACTIVE_CONVERTER = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "course-video-interactive-converter");
         thread.setDaemon(true);
@@ -57,6 +63,11 @@ public class ProtectedVideoService
     });
     private static final ExecutorService PREWARM_CONVERTER = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "course-video-prewarm-converter");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private static final ExecutorService DURATION_PROBER = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "course-video-duration-prober");
         thread.setDaemon(true);
         return thread;
     });
@@ -111,6 +122,99 @@ public class ProtectedVideoService
         schedule(source, true);
     }
 
+    /** Returns immediately. Slow media inspection always stays off the API thread. */
+    public int durationSeconds(String source)
+    {
+        try
+        {
+            String key = cacheKey(source);
+            Integer cached = DURATIONS.get(key);
+            if (cached != null) return cached;
+
+            if (isReady(source))
+            {
+                int playlistDuration = completedPlaylistDurationSeconds(new File(cacheDirectory(source), "index.m3u8"));
+                if (playlistDuration > 0)
+                {
+                    DURATIONS.put(key, playlistDuration);
+                    return playlistDuration;
+                }
+            }
+
+            scheduleDurationProbe(source, key);
+            return 0;
+        }
+        catch (Exception ignored)
+        {
+            return 0;
+        }
+    }
+
+    private void scheduleDurationProbe(String source, String key)
+    {
+        if (DURATIONS.containsKey(key)) return;
+        if (DURATION_RETRY_AFTER.getOrDefault(key, 0L) > System.currentTimeMillis()) return;
+        if (!DURATION_PROBES.add(key)) return;
+        DURATION_PROBER.submit(() -> {
+            try
+            {
+                File input = resolveLocalVideoFile(source);
+                if (input == null)
+                {
+                    DURATION_RETRY_AFTER.put(key, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1));
+                    return;
+                }
+                Process process = new ProcessBuilder(
+                    "ffmpeg", "-hide_banner", "-i",
+                    input.getCanonicalPath()
+                ).redirectErrorStream(true).start();
+                if (!process.waitFor(12, TimeUnit.SECONDS))
+                {
+                    process.destroyForcibly();
+                    throw new IOException("视频时长探测超时");
+                }
+                StringBuilder output = new StringBuilder();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    process.getInputStream(), StandardCharsets.UTF_8)))
+                {
+                    String line;
+                    while ((line = reader.readLine()) != null && output.length() < 64 * 1024)
+                    {
+                        output.append(line).append('\n');
+                    }
+                }
+                Matcher durationMatch = Pattern.compile("Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
+                    .matcher(output);
+                int duration = 0;
+                if (durationMatch.find())
+                {
+                    duration = (int) Math.ceil(
+                        Integer.parseInt(durationMatch.group(1)) * 3600D
+                            + Integer.parseInt(durationMatch.group(2)) * 60D
+                            + Double.parseDouble(durationMatch.group(3))
+                    );
+                }
+                if (duration > 0)
+                {
+                    DURATIONS.put(key, duration);
+                    DURATION_RETRY_AFTER.remove(key);
+                }
+                else
+                {
+                    DURATION_RETRY_AFTER.put(key, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1));
+                }
+            }
+            catch (Exception ignored)
+            {
+                DURATION_RETRY_AFTER.put(key, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1));
+            }
+            finally
+            {
+                DURATION_PROBES.remove(key);
+            }
+        });
+    }
+
     public void retryAsync(String source)
     {
         try
@@ -142,6 +246,7 @@ public class ProtectedVideoService
         try
         {
             String key = cacheKey(value);
+            scheduleDurationProbe(value, key);
             Set<String> queued = interactive ? INTERACTIVE_QUEUED : PREWARM_QUEUED;
             ExecutorService executor = interactive ? INTERACTIVE_CONVERTER : PREWARM_CONVERTER;
             if (!queued.add(key)) return;
@@ -536,6 +641,28 @@ public class ProtectedVideoService
                 if (segment.isFile() && segment.length() > 0L) count += 1;
             }
             return count;
+        }
+        catch (Exception ignored)
+        {
+            return 0;
+        }
+    }
+
+    private static int completedPlaylistDurationSeconds(File playlist)
+    {
+        try
+        {
+            double total = 0D;
+            boolean complete = false;
+            for (String rawLine : Files.readAllLines(playlist.toPath(), StandardCharsets.UTF_8))
+            {
+                String line = rawLine.trim();
+                if ("#EXT-X-ENDLIST".equals(line)) complete = true;
+                if (!line.startsWith("#EXTINF:")) continue;
+                String value = line.substring("#EXTINF:".length()).split(",", 2)[0].trim();
+                total += Double.parseDouble(value);
+            }
+            return complete && total > 0D ? (int) Math.ceil(total) : 0;
         }
         catch (Exception ignored)
         {

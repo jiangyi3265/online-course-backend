@@ -767,6 +767,7 @@ public class CourseApiController
         @RequestParam(required = false, defaultValue = "-1") int lessonIndex,
         @RequestParam(required = false, defaultValue = "-1") int childIndex,
         @RequestParam(required = false, defaultValue = "0") int retry,
+        @RequestParam(required = false, defaultValue = "0") int durationOnly,
         HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
@@ -837,8 +838,11 @@ public class CourseApiController
             }
             if (protectedVideoService.isPlayable(videoUrl))
             {
-                String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
-                streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                if (durationOnly <= 0)
+                {
+                    String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+                    streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                }
             }
             else
             {
@@ -848,8 +852,11 @@ public class CourseApiController
                     protectedVideoService.prepareAsync(videoUrl);
                     if (protectedVideoService.isPlayable(videoUrl))
                     {
-                        String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user, request);
-                        streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                        if (durationOnly <= 0)
+                        {
+                            String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+                            streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                        }
                     }
                     else
                     {
@@ -858,6 +865,10 @@ public class CourseApiController
                 }
             }
         }
+        int videoDuration = videoUrl.length() == 0 ? 0 : Math.max(
+            lessonMeta == null ? 0 : intValue(lessonMeta.get("duration")),
+            protectedVideoService.durationSeconds(videoUrl)
+        );
         Map<String, Object> data = map(
             "id", lessonId,
             "title", lessonMeta == null ? lessonId : firstNonBlank(lessonMeta.get("title"), lessonMeta.get("name"), lessonId),
@@ -865,7 +876,8 @@ public class CourseApiController
             "poster", poster,
             "courseTitle", course == null ? "" : stripCourseYear(course.get("courseName")),
             "chapterTitle", lessonMeta == null ? "" : str(lessonMeta.get("chapterTitle")),
-            "duration", lessonMeta == null ? 0 : intValue(lessonMeta.get("duration")),
+            "duration", videoDuration,
+            "durationPending", videoUrl.length() > 0 && videoDuration <= 0,
             "pageTotal", lessonMeta == null ? 0 : intValue(lessonMeta.get("pageTotal")),
             "prevTitle", lessonMeta == null ? "" : firstNonBlank(lessonMeta.get("prevTitle"), lessonMeta.get("previousTitle")),
             "nextTitle", lessonMeta == null ? "" : firstNonBlank(lessonMeta.get("nextTitle")),
@@ -894,10 +906,10 @@ public class CourseApiController
     }
 
     @GetMapping(value = "/app/lesson/playlist.m3u8", produces = "application/vnd.apple.mpegurl;charset=UTF-8")
-    public void lessonVideoPlaylist(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+    public void lessonVideoPlaylist(@RequestParam String token, HttpServletResponse response)
         throws IOException
     {
-        Map<String, Object> grant = validVideoGrant(token, request, response);
+        Map<String, Object> grant = validVideoGrant(token, response);
         if (grant == null) return;
         String source = str(grant.get("source")).trim();
         try
@@ -917,9 +929,9 @@ public class CourseApiController
 
     @GetMapping(value = "/app/lesson/segment.ts", produces = "video/mp2t")
     public void lessonVideoSegment(@RequestParam String token, @RequestParam String name,
-        HttpServletRequest request, HttpServletResponse response) throws IOException
+        HttpServletResponse response) throws IOException
     {
-        Map<String, Object> grant = validVideoGrant(token, request, response);
+        Map<String, Object> grant = validVideoGrant(token, response);
         if (grant == null) return;
         File segment = protectedVideoService.segment(str(grant.get("source")), name);
         if (segment == null)
@@ -939,10 +951,10 @@ public class CourseApiController
     }
 
     @GetMapping(value = "/app/lesson/key.bin", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public void lessonVideoKey(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+    public void lessonVideoKey(@RequestParam String token, HttpServletResponse response)
         throws IOException
     {
-        Map<String, Object> grant = validVideoGrant(token, request, response);
+        Map<String, Object> grant = validVideoGrant(token, response);
         if (grant == null) return;
         File key = protectedVideoService.keyFile(str(grant.get("source")));
         if (key == null)
@@ -956,8 +968,7 @@ public class CourseApiController
         Files.copy(key.toPath(), response.getOutputStream());
     }
 
-    private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user,
-        HttpServletRequest request)
+    private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user)
     {
         long nowMillis = System.currentTimeMillis();
         videoStreamTokens.entrySet().removeIf(entry -> longValue(entry.getValue().get("expiresAt")) < nowMillis);
@@ -967,14 +978,13 @@ public class CourseApiController
             "courseId", courseId,
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
-            "fingerprint", videoClientNetworkFingerprint(request),
             "issuedAt", nowMillis,
             "expiresAt", nowMillis + VIDEO_STREAM_TOKEN_TTL_MILLIS
         ));
         return token;
     }
 
-    private Map<String, Object> validVideoGrant(String token, HttpServletRequest request, HttpServletResponse response)
+    private Map<String, Object> validVideoGrant(String token, HttpServletResponse response)
         throws IOException
     {
         String normalized = str(token).trim();
@@ -986,26 +996,12 @@ public class CourseApiController
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证已失效，请返回课程重新进入");
             return null;
         }
-        if (!Objects.equals(str(grant.get("fingerprint")), videoClientNetworkFingerprint(request)))
-        {
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, "视频播放凭证与当前设备不匹配");
-            return null;
-        }
         if (str(grant.get("source")).trim().length() == 0)
         {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
             return null;
         }
         return grant;
-    }
-
-    private String videoClientNetworkFingerprint(HttpServletRequest request)
-    {
-        String forwarded = str(request.getHeader("X-Forwarded-For")).trim();
-        String address = forwarded.length() > 0 ? forwarded.split(",", 2)[0].trim() : str(request.getRemoteAddr()).trim();
-        // Android/微信的原生媒体内核会使用与页面请求不同的 User-Agent。
-        // 播放凭证继续绑定当前网络地址，但不再错误地拦截同一手机的媒体分段请求。
-        return Integer.toHexString(Objects.hash(address));
     }
 
     private void applyProtectedVideoHeaders(HttpServletResponse response)
