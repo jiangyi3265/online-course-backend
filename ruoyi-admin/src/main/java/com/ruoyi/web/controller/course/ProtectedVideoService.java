@@ -45,6 +45,7 @@ public class ProtectedVideoService
     // being served even after the conversion settings have been fixed.
     private static final String CACHE_FORMAT_VERSION = "h264-baseline-720p-yuv420p-hls4-v4";
     private static final String CACHE_FORMAT_FILE = "format-version.txt";
+    private static final String COMPATIBILITY_FILE = "compat.mp4";
     private static final int HLS_SEGMENT_SECONDS = 4;
     private static final int MIN_PLAYABLE_SEGMENTS = 1;
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -56,7 +57,12 @@ public class ProtectedVideoService
     private static final Map<String, Integer> DURATIONS = new ConcurrentHashMap<>();
     private static final Map<String, Long> DURATION_RETRY_AFTER = new ConcurrentHashMap<>();
     private static final Set<String> DURATION_PROBES = ConcurrentHashMap.newKeySet();
-    private static final ExecutorService INTERACTIVE_CONVERTER = Executors.newSingleThreadExecutor(task -> {
+    private static final Set<String> COMPATIBILITY_QUEUED = ConcurrentHashMap.newKeySet();
+    private static final Map<String, String> COMPATIBILITY_FAILURES = new ConcurrentHashMap<>();
+    // Two bounded interactive workers prevent one long uncached lesson from
+    // blocking every other student's first playback while avoiding an
+    // unbounded ffmpeg fan-out on the application server.
+    private static final ExecutorService INTERACTIVE_CONVERTER = Executors.newFixedThreadPool(2, task -> {
         Thread thread = new Thread(task, "course-video-interactive-converter");
         thread.setDaemon(true);
         return thread;
@@ -68,6 +74,11 @@ public class ProtectedVideoService
     });
     private static final ExecutorService DURATION_PROBER = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "course-video-duration-prober");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private static final ExecutorService COMPATIBILITY_CONVERTER = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "course-video-compatibility-converter");
         thread.setDaemon(true);
         return thread;
     });
@@ -120,6 +131,99 @@ public class ProtectedVideoService
     public void prepareAsync(String source)
     {
         schedule(source, true);
+    }
+
+    /**
+     * Older Android media stacks often advertise HLS support but cannot play
+     * AES-128 playlists reliably. A fast-start MP4 remux of the already
+     * transcoded H.264 Baseline/AAC cache gives those devices a Range-capable
+     * compatibility path without re-encoding the source a second time.
+     */
+    public boolean isCompatibilityReady(String source)
+    {
+        try
+        {
+            File file = new File(cacheDirectory(source), COMPATIBILITY_FILE);
+            return isReady(source) && file.isFile() && file.length() > 1024L;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    public File compatibilityFile(String source) throws IOException
+    {
+        File directory = cacheDirectory(source).getCanonicalFile();
+        File file = new File(directory, COMPATIBILITY_FILE).getCanonicalFile();
+        String prefix = directory.getPath().endsWith(File.separator) ? directory.getPath() : directory.getPath() + File.separator;
+        return file.getPath().startsWith(prefix) && file.isFile() && file.length() > 1024L ? file : null;
+    }
+
+    public String compatibilityFailure(String source)
+    {
+        try
+        {
+            return COMPATIBILITY_FAILURES.getOrDefault(cacheKey(source), "");
+        }
+        catch (Exception ignored)
+        {
+            return "视频源无效";
+        }
+    }
+
+    public void prepareCompatibilityAsync(String source)
+    {
+        String value = normalizeSource(source);
+        if (value.length() == 0 || isCompatibilityReady(value)) return;
+        if (!isReady(value))
+        {
+            prepareAsync(value);
+            return;
+        }
+        try
+        {
+            String key = cacheKey(value);
+            if (!COMPATIBILITY_QUEUED.add(key)) return;
+            COMPATIBILITY_FAILURES.remove(key);
+            COMPATIBILITY_CONVERTER.submit(() -> {
+                try
+                {
+                    if (!isCompatibilityReady(value)) generateCompatibilityFile(value);
+                    COMPATIBILITY_FAILURES.remove(key);
+                }
+                catch (Exception error)
+                {
+                    COMPATIBILITY_FAILURES.put(key, safeFailure(error));
+                    System.err.println("Protected MP4 compatibility generation failed: " + safeFailure(error));
+                }
+                finally
+                {
+                    COMPATIBILITY_QUEUED.remove(key);
+                }
+            });
+        }
+        catch (Exception error)
+        {
+            System.err.println("Protected MP4 compatibility scheduling failed: " + safeFailure(error));
+        }
+    }
+
+    public void retryCompatibilityAsync(String source)
+    {
+        try
+        {
+            String key = cacheKey(source);
+            COMPATIBILITY_FAILURES.remove(key);
+            File file = new File(cacheDirectory(source), COMPATIBILITY_FILE);
+            if (file.isFile() && file.length() <= 1024L) Files.deleteIfExists(file.toPath());
+        }
+        catch (Exception ignored)
+        {
+            // prepareCompatibilityAsync() reports invalid sources normally.
+        }
+        if (!isReady(source)) retryAsync(source);
+        prepareCompatibilityAsync(source);
     }
 
     /** Returns immediately. Slow media inspection always stays off the API thread. */
@@ -404,6 +508,62 @@ public class ProtectedVideoService
             ACTIVE_DIRECTORIES.remove(key, temp);
             if (temp.exists()) deleteRecursively(temp);
             if (stagedInput != null) Files.deleteIfExists(stagedInput.toPath());
+        }
+    }
+
+    private void generateCompatibilityFile(String source) throws Exception
+    {
+        File directory = cacheDirectory(source).getCanonicalFile();
+        if (!isReady(source)) throw new IOException("安全视频尚未生成完成");
+        File playlist = new File(directory, "index.m3u8").getCanonicalFile();
+        File target = new File(directory, COMPATIBILITY_FILE).getCanonicalFile();
+        if (target.isFile() && target.length() > 1024L) return;
+        File temp = new File(directory, ".compat-" + UUID.randomUUID().toString().replace("-", "") + ".mp4").getCanonicalFile();
+        File log = new File(directory, "compatibility.log").getCanonicalFile();
+        Files.deleteIfExists(temp.toPath());
+        Files.deleteIfExists(log.toPath());
+        try
+        {
+            List<String> command = Arrays.asList(
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
+                "-allowed_extensions", "ALL",
+                "-i", playlist.getAbsolutePath(),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                "-movflags", "+faststart",
+                temp.getAbsolutePath()
+            );
+            Process process = new ProcessBuilder(command)
+                .directory(directory)
+                .redirectErrorStream(true)
+                .redirectOutput(log)
+                .start();
+            if (!process.waitFor(15L, TimeUnit.MINUTES))
+            {
+                process.destroyForcibly();
+                throw new IOException("兼容视频生成超时");
+            }
+            if (process.exitValue() != 0 || !temp.isFile() || temp.length() <= 1024L)
+            {
+                String detail = log.isFile()
+                    ? new String(Files.readAllBytes(log.toPath()), StandardCharsets.UTF_8).trim()
+                    : "";
+                if (detail.length() > 500) detail = detail.substring(detail.length() - 500);
+                throw new IOException("兼容视频生成失败" + (detail.length() > 0 ? "：" + detail.replace('\n', ' ').replace('\r', ' ') : ""));
+            }
+            try
+            {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            }
+            catch (Exception ignored)
+            {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        finally
+        {
+            Files.deleteIfExists(temp.toPath());
+            Files.deleteIfExists(log.toPath());
         }
     }
 

@@ -16,6 +16,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -26,6 +27,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.concurrent.ThreadLocalRandom;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
@@ -99,11 +106,20 @@ public class CourseApiController
     private static final Map<String, String> verificationCodes = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> videoStreamTokens = new ConcurrentHashMap<>();
     private static final long VIDEO_STREAM_TOKEN_TTL_MILLIS = 2L * 60L * 60L * 1000L;
+    private static final SecureRandom VIDEO_TOKEN_RANDOM = new SecureRandom();
+    private static final byte[] VIDEO_TOKEN_AAD = "course-video-v2".getBytes(StandardCharsets.US_ASCII);
+    private static final Set<String> LEGACY_SEED_QUESTION_IDS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
+        "q-derivative-1", "q-series-1", "q-logic-1", "q-logic-2",
+        "q-blank-1", "q-blank-2", "q-subjective-1"
+    )));
     private static volatile boolean courseDataReady = false;
     private static volatile String courseDataMessage = "课程数据正在初始化，请稍后重试";
 
     @Value("${ruoyi.profile:}")
     private String profilePath;
+
+    @Value("${token.secret:change-me-before-deploy}")
+    private String tokenSecret;
 
     @Autowired
     private ServerConfig serverConfig;
@@ -150,7 +166,8 @@ public class CourseApiController
                 restoreList(data, "operationLogs", operationLogs);
                 restoreMap(data, "frontendSettings", frontendSettings);
                 restoreProgress(data);
-                boolean changed = normalizeWrongQuestions();
+                boolean changed = removeLegacySeedQuestionData();
+                changed |= normalizeWrongQuestions();
                 courseDataReady = true;
                 courseDataMessage = "课程数据已就绪";
                 if (changed)
@@ -768,6 +785,7 @@ public class CourseApiController
         @RequestParam(required = false, defaultValue = "-1") int childIndex,
         @RequestParam(required = false, defaultValue = "0") int retry,
         @RequestParam(required = false, defaultValue = "0") int durationOnly,
+        @RequestParam(required = false, defaultValue = "0") int legacy,
         HttpServletRequest request)
     {
         Map<String, Object> user = currentUser(request);
@@ -830,37 +848,64 @@ public class CourseApiController
         boolean preparing = false;
         String protectionError = "";
         String streamUrl = "";
+        boolean compatibilityMode = legacy > 0 && durationOnly <= 0;
         if (!locked)
         {
-            if (retry > 0)
+            if (compatibilityMode)
             {
-                protectedVideoService.retryAsync(videoUrl);
-            }
-            if (protectedVideoService.isPlayable(videoUrl))
-            {
-                if (durationOnly <= 0)
+                if (retry > 0) protectedVideoService.retryCompatibilityAsync(videoUrl);
+                if (protectedVideoService.isCompatibilityReady(videoUrl))
                 {
                     String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
-                    streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                    streamUrl = "/course/app/lesson/compat.mp4?token=" + token;
+                }
+                else
+                {
+                    protectionError = firstNonBlank(
+                        protectedVideoService.compatibilityFailure(videoUrl),
+                        protectedVideoService.failure(videoUrl)
+                    );
+                    if (protectionError.length() == 0)
+                    {
+                        protectedVideoService.prepareCompatibilityAsync(videoUrl);
+                        preparing = !protectedVideoService.isCompatibilityReady(videoUrl);
+                        if (!preparing)
+                        {
+                            String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+                            streamUrl = "/course/app/lesson/compat.mp4?token=" + token;
+                        }
+                    }
                 }
             }
             else
             {
-                protectionError = protectedVideoService.failure(videoUrl);
-                if (protectionError.length() == 0)
+                if (retry > 0) protectedVideoService.retryAsync(videoUrl);
+                if (protectedVideoService.isPlayable(videoUrl))
                 {
-                    protectedVideoService.prepareAsync(videoUrl);
-                    if (protectedVideoService.isPlayable(videoUrl))
+                    if (durationOnly <= 0)
                     {
-                        if (durationOnly <= 0)
-                        {
-                            String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
-                            streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
-                        }
+                        String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+                        streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
                     }
-                    else
+                }
+                else
+                {
+                    protectionError = protectedVideoService.failure(videoUrl);
+                    if (protectionError.length() == 0)
                     {
-                        preparing = true;
+                        protectedVideoService.prepareAsync(videoUrl);
+                        if (protectedVideoService.isPlayable(videoUrl))
+                        {
+                            if (durationOnly <= 0)
+                            {
+                                String token = issueVideoStreamToken(videoUrl, courseId, lessonId, user);
+                                streamUrl = "/course/app/lesson/playlist.m3u8?token=" + token;
+                            }
+                        }
+                        else
+                        {
+                            preparing = true;
+                        }
                     }
                 }
             }
@@ -885,7 +930,7 @@ public class CourseApiController
             "progress", lessonProgress.get(progressKey(user, lessonId)),
             "locked", locked,
             "preparing", preparing,
-            "protectionMode", locked ? "" : "hls-aes-128",
+            "protectionMode", locked ? "" : (compatibilityMode ? "mp4-token-range" : "hls-aes-128"),
             "protectionError", protectionError,
             "retryAfterSeconds", preparing ? 2 : 0,
             "lockReason", locked ? "请按课程顺序学习：完成上一节视频（达95%）及其配套练习后，再解锁本节。" : ""
@@ -903,6 +948,24 @@ public class CourseApiController
     {
         applyProtectedVideoHeaders(response);
         response.sendError(HttpServletResponse.SC_GONE, "完整视频下载通道已关闭");
+    }
+
+    @GetMapping(value = "/app/lesson/compat.mp4", produces = "video/mp4")
+    public void lessonCompatibilityVideo(@RequestParam String token, HttpServletRequest request, HttpServletResponse response)
+        throws IOException
+    {
+        Map<String, Object> grant = validVideoGrant(token, response);
+        if (grant == null) return;
+        File file = protectedVideoService.compatibilityFile(str(grant.get("source")));
+        if (file == null)
+        {
+            response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "兼容视频正在准备，请稍后重试");
+            return;
+        }
+        applyProtectedVideoHeaders(response);
+        response.setHeader("Accept-Ranges", "bytes");
+        response.setContentType("video/mp4");
+        streamLocalVideo(file, request, response);
     }
 
     @GetMapping(value = "/app/lesson/playlist.m3u8", produces = "application/vnd.apple.mpegurl;charset=UTF-8")
@@ -971,24 +1034,79 @@ public class CourseApiController
     private String issueVideoStreamToken(String source, String courseId, String lessonId, Map<String, Object> user)
     {
         long nowMillis = System.currentTimeMillis();
-        videoStreamTokens.entrySet().removeIf(entry -> longValue(entry.getValue().get("expiresAt")) < nowMillis);
-        String token = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
-        videoStreamTokens.put(token, map(
+        Map<String, Object> grant = map(
             "source", source,
             "courseId", courseId,
             "lessonId", lessonId,
             "userId", user == null ? null : user.get("id"),
             "issuedAt", nowMillis,
             "expiresAt", nowMillis + VIDEO_STREAM_TOKEN_TTL_MILLIS
-        ));
-        return token;
+        );
+        try
+        {
+            // AES-GCM hides the original /profile path (or remote source URL) while
+            // authenticating the grant. The outer HMAC keeps a clear versioned token
+            // envelope and allows rolling compatibility with the previous format.
+            String payload = "v2." + encryptVideoGrant(grant);
+            return payload + "." + signVideoToken(payload);
+        }
+        catch (Exception error)
+        {
+            throw new IllegalStateException("无法生成视频播放凭证", error);
+        }
     }
 
     private Map<String, Object> validVideoGrant(String token, HttpServletResponse response)
         throws IOException
     {
         String normalized = str(token).trim();
-        Map<String, Object> grant = videoStreamTokens.get(normalized);
+        Map<String, Object> grant = null;
+        if (normalized.startsWith("v2."))
+        {
+            try
+            {
+                int signatureIndex = normalized.lastIndexOf('.');
+                if (signatureIndex <= 3) throw new IllegalArgumentException("invalid video token");
+                String signedPayload = normalized.substring(0, signatureIndex);
+                String signature = normalized.substring(signatureIndex + 1);
+                byte[] expected = signVideoToken(signedPayload).getBytes(StandardCharsets.US_ASCII);
+                byte[] actual = signature.getBytes(StandardCharsets.US_ASCII);
+                if (MessageDigest.isEqual(expected, actual))
+                {
+                    grant = decryptVideoGrant(signedPayload.substring("v2.".length()));
+                }
+            }
+            catch (Exception ignored)
+            {
+                grant = null;
+            }
+        }
+        else
+        {
+            String[] parts = normalized.split("\\.", 2);
+            if (parts.length == 2)
+            {
+                try
+                {
+                    byte[] expected = signVideoToken(parts[0]).getBytes(StandardCharsets.US_ASCII);
+                    byte[] actual = parts[1].getBytes(StandardCharsets.US_ASCII);
+                    if (MessageDigest.isEqual(expected, actual))
+                    {
+                        byte[] payload = Base64.getUrlDecoder().decode(parts[0]);
+                        grant = objectMapper.readValue(payload, new TypeReference<Map<String, Object>>() {});
+                    }
+                }
+                catch (Exception ignored)
+                {
+                    grant = null;
+                }
+            }
+            else
+            {
+                // 发布期间兼容更早的 JVM 内存凭证。
+                grant = videoStreamTokens.get(normalized);
+            }
+        }
         long nowMillis = System.currentTimeMillis();
         if (grant == null || longValue(grant.get("expiresAt")) < nowMillis)
         {
@@ -1002,6 +1120,48 @@ public class CourseApiController
             return null;
         }
         return grant;
+    }
+
+    private String signVideoToken(String payload) throws Exception
+    {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        String secret = firstNonBlank(tokenSecret, "change-me-before-deploy") + "|course-video-v1";
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(payload.getBytes(StandardCharsets.US_ASCII)));
+    }
+
+    private String encryptVideoGrant(Map<String, Object> grant) throws Exception
+    {
+        byte[] nonce = new byte[12];
+        VIDEO_TOKEN_RANDOM.nextBytes(nonce);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, videoTokenEncryptionKey(), new GCMParameterSpec(128, nonce));
+        cipher.updateAAD(VIDEO_TOKEN_AAD);
+        byte[] encrypted = cipher.doFinal(objectMapper.writeValueAsBytes(grant));
+        byte[] envelope = new byte[nonce.length + encrypted.length];
+        System.arraycopy(nonce, 0, envelope, 0, nonce.length);
+        System.arraycopy(encrypted, 0, envelope, nonce.length, encrypted.length);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(envelope);
+    }
+
+    private Map<String, Object> decryptVideoGrant(String payload) throws Exception
+    {
+        byte[] envelope = Base64.getUrlDecoder().decode(payload);
+        if (envelope.length <= 12 + 16) throw new IllegalArgumentException("invalid encrypted video grant");
+        byte[] nonce = Arrays.copyOfRange(envelope, 0, 12);
+        byte[] encrypted = Arrays.copyOfRange(envelope, 12, envelope.length);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, videoTokenEncryptionKey(), new GCMParameterSpec(128, nonce));
+        cipher.updateAAD(VIDEO_TOKEN_AAD);
+        byte[] plain = cipher.doFinal(encrypted);
+        return objectMapper.readValue(plain, new TypeReference<Map<String, Object>>() {});
+    }
+
+    private SecretKeySpec videoTokenEncryptionKey() throws Exception
+    {
+        String secret = firstNonBlank(tokenSecret, "change-me-before-deploy") + "|course-video-aes-v2";
+        byte[] key = MessageDigest.getInstance("SHA-256").digest(secret.getBytes(StandardCharsets.UTF_8));
+        return new SecretKeySpec(key, "AES");
     }
 
     private void applyProtectedVideoHeaders(HttpServletResponse response)
@@ -1051,11 +1211,33 @@ public class CourseApiController
         boolean partial = range.startsWith("bytes=");
         if (partial)
         {
-            String[] bounds = range.substring("bytes=".length()).split("-", 2);
+            String requestedRange = range.substring("bytes=".length()).trim();
+            if (total <= 0L || requestedRange.length() == 0 || requestedRange.contains(","))
+            {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + total);
+                return;
+            }
+            String[] bounds = requestedRange.split("-", 2);
             try
             {
-                if (bounds.length > 0 && bounds[0].trim().length() > 0) start = Long.parseLong(bounds[0].trim());
-                if (bounds.length > 1 && bounds[1].trim().length() > 0) end = Long.parseLong(bounds[1].trim());
+                String first = bounds.length > 0 ? bounds[0].trim() : "";
+                String second = bounds.length > 1 ? bounds[1].trim() : "";
+                if (first.length() == 0)
+                {
+                    long suffixLength = Long.parseLong(second);
+                    if (suffixLength <= 0L) throw new NumberFormatException("invalid suffix range");
+                    suffixLength = Math.min(suffixLength, total);
+                    start = total - suffixLength;
+                    end = total - 1L;
+                }
+                else
+                {
+                    start = Long.parseLong(first);
+                    end = second.length() > 0 ? Long.parseLong(second) : total - 1L;
+                    if (start < 0L || start >= total || end < start) throw new NumberFormatException("invalid byte range");
+                    end = Math.min(end, total - 1L);
+                }
             }
             catch (NumberFormatException ignored)
             {
@@ -1064,8 +1246,6 @@ public class CourseApiController
                 return;
             }
         }
-        start = Math.max(0L, Math.min(start, Math.max(0L, total - 1L)));
-        end = Math.max(start, Math.min(end, Math.max(0L, total - 1L)));
         long length = total == 0L ? 0L : end - start + 1L;
         String contentType = Files.probeContentType(file.toPath());
         response.setContentType(contentType == null ? "video/mp4" : contentType);
@@ -1075,6 +1255,8 @@ public class CourseApiController
             response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
             response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + total);
         }
+        response.setHeader("Accept-Ranges", "bytes");
+        if ("HEAD".equalsIgnoreCase(request.getMethod())) return;
         try (RandomAccessFile input = new RandomAccessFile(file, "r"); OutputStream output = response.getOutputStream())
         {
             input.seek(start);
@@ -2428,6 +2610,16 @@ public class CourseApiController
     {
         Map<String, Object> question = findById(questions, id);
         questions.removeIf(item -> id.equals(item.get("id")));
+        for (Map<String, Object> course : courses)
+        {
+            removeQuestionReference(course, id);
+        }
+        for (Map<String, Object> point : reinforcePoints)
+        {
+            removeQuestionReference(point, id);
+        }
+        favorites.removeIf(item -> id.equals(str(item.get("questionId"))) || id.equals(str(item.get("questionKey"))));
+        wrongQuestions.removeIf(item -> id.equals(str(item.get("questionId"))) || id.equals(str(item.get("questionKey"))));
         logOperation("题库管理", "后台管理员", question == null ? "" : str(question.get("subjectName")), "删除题目：" + (question == null ? id : str(question.get("stem"))), "已完成");
         persistData();
         return AjaxResult.success();
@@ -3662,10 +3854,13 @@ public class CourseApiController
         if (!versions.isEmpty())
         {
             int total = 0;
-            int visibleCount = Math.min(2, versions.size());
-            for (int i = 0; i < visibleCount; i++)
+            for (int i = 0; i < 2; i++)
             {
-                total += countVersionLessons(versions.get(i));
+                Map<String, Object> version = courseVersionAtSlot(versions, i);
+                if (!version.isEmpty())
+                {
+                    total += countVersionLessons(version);
+                }
             }
             if (total > 0)
             {
@@ -3696,10 +3891,13 @@ public class CourseApiController
         if (!versions.isEmpty())
         {
             int total = 0;
-            int visibleCount = Math.min(2, versions.size());
-            for (int i = 0; i < visibleCount; i++)
+            for (int i = 0; i < 2; i++)
             {
-                total += sumVersionDurationSeconds(versions.get(i));
+                Map<String, Object> version = courseVersionAtSlot(versions, i);
+                if (!version.isEmpty())
+                {
+                    total += sumVersionDurationSeconds(version);
+                }
             }
             if (total > 0)
             {
@@ -3867,11 +4065,11 @@ public class CourseApiController
     {
         List<Map<String, Object>> versions = mapList(course.get("versions"));
         List<Map<String, Object>> result = new ArrayList<>();
-        int visibleCount = Math.min(2, versions.size());
-        String[] labels = new String[] {"复习加强", "技巧绝招"};
-        for (int i = 0; i < visibleCount; i++)
+        String[] labels = new String[] {"复习加强课", "技巧绝招课"};
+        for (int i = 0; i < labels.length; i++)
         {
-            Map<String, Object> version = versions.get(i);
+            Map<String, Object> version = courseVersionAtSlot(versions, i);
+            int sourceIndex = versions.indexOf(version);
             int totalLessons = countVersionLessons(version);
             int durationSeconds = sumVersionDurationSeconds(version);
             Map<String, Object> progress = courseVersionProgressStats(user, scopedCourseId(course.get("id")), collectVersionLessonTitles(version), totalLessons);
@@ -3879,6 +4077,9 @@ public class CourseApiController
                 "name", labels[i],
                 "label", labels[i],
                 "versionName", firstNonBlank(version.get("name"), labels[i]),
+                "slotKey", i == 0 ? "review" : "tactics",
+                "sourceIndex", sourceIndex,
+                "available", sourceIndex >= 0 && totalLessons > 0,
                 "totalLessons", totalLessons,
                 "totalDuration", secondsText(durationSeconds),
                 "durationSeconds", durationSeconds,
@@ -3888,6 +4089,28 @@ public class CourseApiController
             ));
         }
         return result;
+    }
+
+    private static Map<String, Object> courseVersionAtSlot(List<Map<String, Object>> versions, int slotIndex)
+    {
+        for (Map<String, Object> version : versions)
+        {
+            if (courseVersionSlot(str(version.get("name"))) == slotIndex) return version;
+        }
+        if (slotIndex >= 0 && slotIndex < versions.size())
+        {
+            Map<String, Object> candidate = versions.get(slotIndex);
+            if (courseVersionSlot(str(candidate.get("name"))) < 0) return candidate;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private static int courseVersionSlot(String name)
+    {
+        String value = str(name).trim();
+        if (value.matches(".*(技巧|绝招).*$")) return 1;
+        if (value.matches(".*(复习|加强|2026).*$")) return 0;
+        return -1;
     }
 
     private static int countVersionLessons(Map<String, Object> version)
@@ -3935,10 +4158,13 @@ public class CourseApiController
     {
         Set<String> titles = new LinkedHashSet<>();
         List<Map<String, Object>> versions = mapList(course.get("versions"));
-        int visibleCount = Math.min(2, versions.size());
-        for (int i = 0; i < visibleCount; i++)
+        for (int i = 0; i < 2; i++)
         {
-            titles.addAll(collectVersionLessonTitles(versions.get(i)));
+            Map<String, Object> version = courseVersionAtSlot(versions, i);
+            if (!version.isEmpty())
+            {
+                titles.addAll(collectVersionLessonTitles(version));
+            }
         }
         if (!titles.isEmpty())
         {
@@ -4095,6 +4321,10 @@ public class CourseApiController
         List<String> questionIds = stringList(payload.get("questionIds"));
         List<String> sourceWrongIds = stringList(payload.get("sourceWrongIds"));
         List<Map<String, Object>> source = questionIds.isEmpty() ? questionsFor(title) : questionsByIds(questionIds);
+        if (source.isEmpty())
+        {
+            return AjaxResult.error("本练习题库暂未配置，请返回课程并稍后再试");
+        }
         int correct = 0;
         int gradable = 0;
         int manualReviewCount = 0;
@@ -4323,19 +4553,153 @@ public class CourseApiController
 
     private static List<Map<String, Object>> questionsFor(String title)
     {
-        if (title.contains("导数") || title.contains("极值"))
+        // 题目只能来自后台显式绑定的 questionIds。旧版按标题匹配题目或
+        // 任取前三题的兜底会把示例题串到无关课程，数据库未配置时应返回空集。
+        return Collections.emptyList();
+    }
+
+    private static boolean removeLegacySeedQuestionData()
+    {
+        boolean changed = questions.removeIf(question -> LEGACY_SEED_QUESTION_IDS.contains(str(question.get("id")).trim()));
+        changed |= favorites.removeIf(CourseApiController::referencesLegacySeedQuestion);
+        changed |= wrongQuestions.removeIf(CourseApiController::referencesLegacySeedQuestion);
+        Set<String> validQuestionIds = new LinkedHashSet<>();
+        for (Map<String, Object> question : questions)
         {
-            return questionsByIds(Arrays.asList("q-derivative-1", "q-logic-2", "q-blank-1", "q-subjective-1"));
+            String id = str(question.get("id")).trim();
+            if (id.length() > 0) validQuestionIds.add(id);
         }
-        if (title.contains("数列") || title.contains("通项"))
+        for (Map<String, Object> course : courses)
         {
-            return questionsByIds(Arrays.asList("q-series-1", "q-logic-1", "q-blank-2", "q-subjective-1"));
+            changed |= removeLegacyQuestionReferences(course);
+            changed |= removeDanglingQuestionReferences(course, validQuestionIds);
         }
-        if (title.contains("集合") || title.contains("逻辑") || title.contains("不等式"))
+        for (Map<String, Object> point : reinforcePoints)
         {
-            return questionsByIds(Arrays.asList("q-logic-1", "q-logic-2", "q-blank-1", "q-subjective-1"));
+            changed |= removeLegacyQuestionReferences(point);
+            changed |= removeDanglingQuestionReferences(point, validQuestionIds);
         }
-        return questions.subList(0, Math.min(3, questions.size()));
+        return changed;
+    }
+
+    private static boolean referencesLegacySeedQuestion(Map<String, Object> item)
+    {
+        return LEGACY_SEED_QUESTION_IDS.contains(str(item.get("questionId")).trim())
+            || LEGACY_SEED_QUESTION_IDS.contains(str(item.get("questionKey")).trim());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean removeLegacyQuestionReferences(Object value)
+    {
+        boolean changed = false;
+        if (value instanceof Map)
+        {
+            Map<String, Object> object = (Map<String, Object>) value;
+            Object rawIds = object.get("questionIds");
+            if (rawIds instanceof List)
+            {
+                List<String> ids = stringList(rawIds);
+                List<String> cleaned = new ArrayList<>();
+                for (String id : ids)
+                {
+                    if (!LEGACY_SEED_QUESTION_IDS.contains(str(id).trim())) cleaned.add(id);
+                }
+                if (cleaned.size() != ids.size())
+                {
+                    object.put("questionIds", cleaned);
+                    if (object.containsKey("total")) object.put("total", cleaned.size());
+                    changed = true;
+                }
+            }
+            for (Object nested : new ArrayList<>(object.values()))
+            {
+                changed |= removeLegacyQuestionReferences(nested);
+            }
+        }
+        else if (value instanceof List)
+        {
+            for (Object nested : new ArrayList<>((List<Object>) value))
+            {
+                changed |= removeLegacyQuestionReferences(nested);
+            }
+        }
+        return changed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean removeDanglingQuestionReferences(Object value, Set<String> validQuestionIds)
+    {
+        boolean changed = false;
+        if (value instanceof Map)
+        {
+            Map<String, Object> object = (Map<String, Object>) value;
+            Object rawIds = object.get("questionIds");
+            if (rawIds instanceof List)
+            {
+                List<String> ids = stringList(rawIds);
+                List<String> cleaned = new ArrayList<>();
+                for (String id : ids)
+                {
+                    if (validQuestionIds.contains(str(id).trim())) cleaned.add(id);
+                }
+                if (cleaned.size() != ids.size())
+                {
+                    object.put("questionIds", cleaned);
+                    if (object.containsKey("total")) object.put("total", cleaned.size());
+                    changed = true;
+                }
+            }
+            for (Object nested : new ArrayList<>(object.values()))
+            {
+                changed |= removeDanglingQuestionReferences(nested, validQuestionIds);
+            }
+        }
+        else if (value instanceof List)
+        {
+            for (Object nested : new ArrayList<>((List<Object>) value))
+            {
+                changed |= removeDanglingQuestionReferences(nested, validQuestionIds);
+            }
+        }
+        return changed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean removeQuestionReference(Object value, String questionId)
+    {
+        boolean changed = false;
+        if (value instanceof Map)
+        {
+            Map<String, Object> object = (Map<String, Object>) value;
+            Object rawIds = object.get("questionIds");
+            if (rawIds instanceof List)
+            {
+                List<String> ids = stringList(rawIds);
+                List<String> cleaned = new ArrayList<>();
+                for (String id : ids)
+                {
+                    if (!questionId.equals(str(id).trim())) cleaned.add(id);
+                }
+                if (cleaned.size() != ids.size())
+                {
+                    object.put("questionIds", cleaned);
+                    if (object.containsKey("total")) object.put("total", cleaned.size());
+                    changed = true;
+                }
+            }
+            for (Object nested : new ArrayList<>(object.values()))
+            {
+                changed |= removeQuestionReference(nested, questionId);
+            }
+        }
+        else if (value instanceof List)
+        {
+            for (Object nested : new ArrayList<>((List<Object>) value))
+            {
+                changed |= removeQuestionReference(nested, questionId);
+            }
+        }
+        return changed;
     }
 
     private static Map<String, Object> findCourseQuiz(String quizId, String courseId)

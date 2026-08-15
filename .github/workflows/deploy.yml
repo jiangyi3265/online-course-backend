@@ -706,6 +706,18 @@ jobs:
 
           mkdir -p "$APP_DIR/logs" "$APP_DIR/uploadPath"
 
+          # The application performs a one-time cleanup of legacy mock question IDs
+          # during startup. Preserve the exact pre-migration JSON so the data change
+          # is recoverable independently of the application package rollback.
+          COURSE_DATA_FILE="$APP_DIR/uploadPath/course-data.json"
+          if [ -f "$COURSE_DATA_FILE" ]; then
+            COURSE_DATA_BACKUP_DIR="$APP_DIR/backups/course-data"
+            mkdir -p "$COURSE_DATA_BACKUP_DIR"
+            COURSE_DATA_BACKUP="$COURSE_DATA_BACKUP_DIR/course-data-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:-manual}.json"
+            cp -p "$COURSE_DATA_FILE" "$COURSE_DATA_BACKUP"
+            echo "course data backup created: $COURSE_DATA_BACKUP"
+          fi
+
           # Protected course playback is generated as AES-128 HLS on the
           # server. Fail the deployment instead of ever falling back to a
           # directly downloadable MP4 when the converter is unavailable.
