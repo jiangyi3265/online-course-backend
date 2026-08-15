@@ -1015,3 +1015,213 @@ jobs:
           tail -n 120 "$LOG_FILE" || true
           exit 1
           REMOTE
+
+      - name: Configure protected video range proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-i ~/.ssh/deploy_key -p $DEPLOY_PORT -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=60 -o ConnectionAttempts=2 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          timeout 3m ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          MASTER_PID="$(ps -eo pid=,args= | awk '/nginx: master process/ { print $1; exit }')"
+          NGINX_BIN=""
+          if [ -n "$MASTER_PID" ] && [ -e "/proc/$MASTER_PID/exe" ]; then
+            NGINX_BIN="$(readlink -f "/proc/$MASTER_PID/exe" || true)"
+          fi
+          if [ ! -x "$NGINX_BIN" ] && [ -x /www/server/nginx/sbin/nginx ]; then
+            NGINX_BIN=/www/server/nginx/sbin/nginx
+          fi
+          if [ ! -x "$NGINX_BIN" ] && command -v nginx >/dev/null 2>&1; then
+            NGINX_BIN="$(command -v nginx)"
+          fi
+          if [ ! -x "$NGINX_BIN" ]; then
+            echo "active nginx binary was not found"
+            exit 1
+          fi
+
+          BACKUP_ROOT="/var/backups/codex-nginx-range/$(date +%Y%m%d%H%M%S)"
+          mkdir -p "$BACKUP_ROOT"
+          ACTIVE_CONFIGS="$BACKUP_ROOT/active-configs.txt"
+          "$NGINX_BIN" -T 2>&1 \
+            | sed -n 's/^# configuration file \(.*\):$/\1/p' \
+            | sort -u > "$ACTIVE_CONFIGS"
+          if [ ! -s "$ACTIVE_CONFIGS" ]; then
+            echo "nginx did not report its active configuration files"
+            exit 1
+          fi
+
+          ROLLBACK_NEEDED=1
+          rollback_range_config() {
+            status=$?
+            trap - ERR
+            manifest="$BACKUP_ROOT/manifest.json"
+            if [ "$ROLLBACK_NEEDED" = "1" ] && [ -f "$manifest" ]; then
+              python3 - "$manifest" <<'PY'
+          import json
+          import os
+          import shutil
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as handle:
+              records = json.load(handle)
+          for record in records:
+              temp_path = record["path"] + ".codex-range-restore.tmp"
+              shutil.copy2(record["backup"], temp_path)
+              os.replace(temp_path, record["path"])
+          print("Restored the previous nginx configuration")
+          PY
+              "$NGINX_BIN" -t || true
+              "$NGINX_BIN" -s reload || true
+            fi
+            exit "$status"
+          }
+          trap rollback_range_config ERR
+
+          python3 - "$BACKUP_ROOT" "$ACTIVE_CONFIGS" <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import sys
+
+          backup_root = sys.argv[1]
+          with open(sys.argv[2], "r", encoding="utf-8") as handle:
+              paths = [line.strip() for line in handle if line.strip()]
+
+          location_pattern = re.compile(
+              r"(?m)^(?P<indent>[ \t]*)location[ \t]+(?:\^~[ \t]+)?/course/[ \t]*\{"
+          )
+          managed_names = (
+              "proxy_set_header Range",
+              "proxy_set_header If-Range",
+              "proxy_force_ranges",
+              "proxy_buffering",
+              "proxy_request_buffering",
+              "proxy_read_timeout",
+              "proxy_send_timeout",
+          )
+          matched = 0
+          pending = []
+
+          def block_end(text, opening_brace):
+              depth = 0
+              quote = None
+              escaped = False
+              in_comment = False
+              for index in range(opening_brace, len(text)):
+                  char = text[index]
+                  if in_comment:
+                      if char == "\n":
+                          in_comment = False
+                      continue
+                  if escaped:
+                      escaped = False
+                      continue
+                  if char == "\\":
+                      escaped = True
+                      continue
+                  if quote:
+                      if char == quote:
+                          quote = None
+                      continue
+                  if char in ("'", '"'):
+                      quote = char
+                      continue
+                  if char == "#":
+                      in_comment = True
+                      continue
+                  if char == "{":
+                      depth += 1
+                  elif char == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return index
+              raise RuntimeError("unbalanced nginx location block")
+
+          for raw_path in sorted(set(paths)):
+              path = os.path.realpath(raw_path)
+              if not os.path.isfile(path):
+                  continue
+              with open(path, "r", encoding="utf-8") as handle:
+                  original = handle.read()
+              if "yzzhixue.cn" not in original:
+                  continue
+
+              updated = original
+              search_from = 0
+              file_matched = False
+              while True:
+                  match = location_pattern.search(updated, search_from)
+                  if not match:
+                      break
+                  opening_brace = updated.find("{", match.start(), match.end())
+                  closing_brace = block_end(updated, opening_brace)
+                  body = updated[opening_brace + 1:closing_brace]
+                  kept_lines = []
+                  for line in body.splitlines():
+                      stripped = line.strip()
+                      if any(stripped.startswith(name + " ") or stripped == name + ";" for name in managed_names):
+                          continue
+                      kept_lines.append(line)
+
+                  indent = match.group("indent") + "    "
+                  directives = [
+                      f"{indent}proxy_set_header Range $http_range;",
+                      f"{indent}proxy_set_header If-Range $http_if_range;",
+                      f"{indent}proxy_force_ranges on;",
+                      f"{indent}proxy_buffering off;",
+                      f"{indent}proxy_request_buffering off;",
+                      f"{indent}proxy_read_timeout 1800s;",
+                      f"{indent}proxy_send_timeout 1800s;",
+                  ]
+                  cleaned = "\n".join(kept_lines).strip("\n")
+                  replacement = "\n" + "\n".join(directives)
+                  if cleaned:
+                      replacement += "\n" + cleaned
+                  replacement += "\n" + match.group("indent")
+                  updated = updated[:opening_brace + 1] + replacement + updated[closing_brace:]
+                  search_from = opening_brace + 1 + len(replacement) + 1
+                  file_matched = True
+                  matched += 1
+
+              if not file_matched:
+                  continue
+              pending.append((path, original, updated))
+
+          if matched == 0:
+              raise SystemExit("No yzzhixue.cn location /course/ block was found; refusing to reload nginx")
+
+          records = []
+          for index, (path, original, updated) in enumerate(pending):
+              backup_path = os.path.join(backup_root, f"{index}.backup.conf")
+              updated_path = os.path.join(backup_root, f"{index}.updated.conf")
+              shutil.copy2(path, backup_path)
+              with open(updated_path, "w", encoding="utf-8", newline="") as handle:
+                  handle.write(updated)
+              os.chmod(updated_path, os.stat(path).st_mode)
+              records.append({
+                  "path": path,
+                  "backup": backup_path,
+                  "updated": updated_path,
+              })
+
+          manifest_path = os.path.join(backup_root, "manifest.json")
+          manifest_temp = manifest_path + ".tmp"
+          with open(manifest_temp, "w", encoding="utf-8") as handle:
+              json.dump(records, handle, ensure_ascii=False, indent=2)
+          os.replace(manifest_temp, manifest_path)
+
+          for record in records:
+              temp_path = record["path"] + ".codex-range.tmp"
+              shutil.copy2(record["updated"], temp_path)
+              os.replace(temp_path, record["path"])
+          print(f"Configured Range forwarding in {matched} /course/ block(s)")
+          PY
+
+          "$NGINX_BIN" -t
+          "$NGINX_BIN" -s reload
+          ROLLBACK_NEEDED=0
+          trap - ERR
+          echo "active nginx instance reloaded from $NGINX_BIN"
+          REMOTE
