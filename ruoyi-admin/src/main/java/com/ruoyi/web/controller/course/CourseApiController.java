@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -962,8 +964,7 @@ public class CourseApiController
             response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "兼容视频正在准备，请稍后重试");
             return;
         }
-        applyProtectedVideoHeaders(response);
-        response.setHeader("Accept-Ranges", "bytes");
+        applyCompatibilityVideoHeaders(response, file);
         response.setContentType("video/mp4");
         streamLocalVideo(file, request, response);
     }
@@ -1174,6 +1175,25 @@ public class CourseApiController
         response.setHeader("X-Download-Options", "noopen");
     }
 
+    private void applyCompatibilityVideoHeaders(HttpServletResponse response, File file)
+    {
+        // Native Android players need a short private cache window to perform
+        // metadata and byte-range probes reliably. `no-store` makes several old
+        // WebViews discard the moov/range response and restart at 00:00.
+        response.setHeader("Cache-Control", "private, max-age=300, no-transform");
+        response.setHeader("Accept-Ranges", "bytes");
+        response.setHeader("Content-Disposition", "inline; filename=lesson.mp4");
+        response.setHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Range, Content-Length, ETag, Last-Modified");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        response.setHeader("X-Accel-Buffering", "no");
+        if (file != null)
+        {
+            response.setDateHeader("Last-Modified", file.lastModified());
+            response.setHeader("ETag", "\"" + file.length() + "-" + file.lastModified() + "\"");
+        }
+    }
+
     private File resolveLocalVideoFile(String source) throws IOException
     {
         String requested = str(source).trim().replace('\\', '/');
@@ -1209,6 +1229,28 @@ public class CourseApiController
         long end = Math.max(0L, total - 1L);
         String range = str(request.getHeader("Range")).trim();
         boolean partial = range.startsWith("bytes=");
+        String ifRange = str(request.getHeader("If-Range")).trim();
+        if (partial && ifRange.length() > 0)
+        {
+            String currentEtag = "\"" + file.length() + "-" + file.lastModified() + "\"";
+            boolean validatorMatches = currentEtag.equals(ifRange);
+            if (!validatorMatches && !ifRange.startsWith("\"") && !ifRange.startsWith("W/"))
+            {
+                try
+                {
+                    long validatorTime = ZonedDateTime.parse(ifRange, DateTimeFormatter.RFC_1123_DATE_TIME)
+                        .toInstant().toEpochMilli();
+                    validatorMatches = file.lastModified() / 1000L <= validatorTime / 1000L;
+                }
+                catch (Exception ignored)
+                {
+                    validatorMatches = false;
+                }
+            }
+            // RFC 7233: a stale or invalid If-Range validator requires the
+            // complete current representation instead of a partial response.
+            if (!validatorMatches) partial = false;
+        }
         if (partial)
         {
             String requestedRange = range.substring("bytes=".length()).trim();

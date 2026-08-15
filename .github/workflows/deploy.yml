@@ -1092,14 +1092,21 @@ jobs:
           location_pattern = re.compile(
               r"(?m)^(?P<indent>[ \t]*)location[ \t]+(?:\^~[ \t]+)?/course/[ \t]*\{"
           )
+          server_pattern = re.compile(r"(?m)^(?P<indent>[ \t]*)server[ \t]*\{")
+          server_name_pattern = re.compile(
+              r"(?m)^[ \t]*server_name[ \t]+(?P<names>[^;]+);"
+          )
+          allowed_server_names = {"yzzhixue.cn", "www.yzzhixue.cn"}
           managed_names = (
               "proxy_set_header Range",
               "proxy_set_header If-Range",
+              "proxy_hide_header Accept-Ranges",
               "proxy_force_ranges",
               "proxy_buffering",
               "proxy_request_buffering",
               "proxy_read_timeout",
               "proxy_send_timeout",
+              "add_header Accept-Ranges",
           )
           matched = 0
           pending = []
@@ -1145,48 +1152,55 @@ jobs:
                   continue
               with open(path, "r", encoding="utf-8") as handle:
                   original = handle.read()
-              if "yzzhixue.cn" not in original:
-                  continue
+              edits = []
+              for server_match in server_pattern.finditer(original):
+                  server_opening = original.find("{", server_match.start(), server_match.end())
+                  server_closing = block_end(original, server_opening)
+                  server_body = original[server_opening + 1:server_closing]
+                  configured_names = {
+                      token.strip("\"'")
+                      for directive in server_name_pattern.finditer(server_body)
+                      for token in directive.group("names").split()
+                  }
+                  if not configured_names.intersection(allowed_server_names):
+                      continue
 
+                  for match in location_pattern.finditer(server_body):
+                      match_start = server_opening + 1 + match.start()
+                      match_end = server_opening + 1 + match.end()
+                      opening_brace = original.find("{", match_start, match_end)
+                      closing_brace = block_end(original, opening_brace)
+                      body = original[opening_brace + 1:closing_brace]
+                      kept_lines = []
+                      for line in body.splitlines():
+                          stripped = line.strip()
+                          if any(stripped.startswith(name + " ") or stripped == name + ";" for name in managed_names):
+                              continue
+                          kept_lines.append(line)
+
+                      indent = match.group("indent") + "    "
+                      directives = [
+                          f"{indent}proxy_set_header Range $http_range;",
+                          f"{indent}proxy_set_header If-Range $http_if_range;",
+                          f"{indent}proxy_force_ranges on;",
+                          f"{indent}proxy_buffering off;",
+                          f"{indent}proxy_request_buffering off;",
+                          f"{indent}proxy_read_timeout 1800s;",
+                          f"{indent}proxy_send_timeout 1800s;",
+                      ]
+                      cleaned = "\n".join(kept_lines).strip("\n")
+                      replacement = "\n" + "\n".join(directives)
+                      if cleaned:
+                          replacement += "\n" + cleaned
+                      replacement += "\n" + match.group("indent")
+                      edits.append((opening_brace + 1, closing_brace, replacement))
+                      matched += 1
+
+              if not edits:
+                  continue
               updated = original
-              search_from = 0
-              file_matched = False
-              while True:
-                  match = location_pattern.search(updated, search_from)
-                  if not match:
-                      break
-                  opening_brace = updated.find("{", match.start(), match.end())
-                  closing_brace = block_end(updated, opening_brace)
-                  body = updated[opening_brace + 1:closing_brace]
-                  kept_lines = []
-                  for line in body.splitlines():
-                      stripped = line.strip()
-                      if any(stripped.startswith(name + " ") or stripped == name + ";" for name in managed_names):
-                          continue
-                      kept_lines.append(line)
-
-                  indent = match.group("indent") + "    "
-                  directives = [
-                      f"{indent}proxy_set_header Range $http_range;",
-                      f"{indent}proxy_set_header If-Range $http_if_range;",
-                      f"{indent}proxy_force_ranges on;",
-                      f"{indent}proxy_buffering off;",
-                      f"{indent}proxy_request_buffering off;",
-                      f"{indent}proxy_read_timeout 1800s;",
-                      f"{indent}proxy_send_timeout 1800s;",
-                  ]
-                  cleaned = "\n".join(kept_lines).strip("\n")
-                  replacement = "\n" + "\n".join(directives)
-                  if cleaned:
-                      replacement += "\n" + cleaned
-                  replacement += "\n" + match.group("indent")
-                  updated = updated[:opening_brace + 1] + replacement + updated[closing_brace:]
-                  search_from = opening_brace + 1 + len(replacement) + 1
-                  file_matched = True
-                  matched += 1
-
-              if not file_matched:
-                  continue
+              for start, end, replacement in sorted(edits, reverse=True):
+                  updated = updated[:start] + replacement + updated[end:]
               pending.append((path, original, updated))
 
           if matched == 0:

@@ -57,6 +57,7 @@ public class ProtectedVideoService
     private static final Map<String, Integer> DURATIONS = new ConcurrentHashMap<>();
     private static final Map<String, Long> DURATION_RETRY_AFTER = new ConcurrentHashMap<>();
     private static final Set<String> DURATION_PROBES = ConcurrentHashMap.newKeySet();
+    private static final Set<String> COMPATIBILITY_REQUESTED = ConcurrentHashMap.newKeySet();
     private static final Set<String> COMPATIBILITY_QUEUED = ConcurrentHashMap.newKeySet();
     private static final Map<String, String> COMPATIBILITY_FAILURES = new ConcurrentHashMap<>();
     // Two bounded interactive workers prevent one long uncached lesson from
@@ -77,7 +78,9 @@ public class ProtectedVideoService
         thread.setDaemon(true);
         return thread;
     });
-    private static final ExecutorService COMPATIBILITY_CONVERTER = Executors.newSingleThreadExecutor(task -> {
+    // MP4 remux does not re-encode video. Two bounded workers avoid one long
+    // lesson blocking every Android device while keeping disk I/O controlled.
+    private static final ExecutorService COMPATIBILITY_CONVERTER = Executors.newFixedThreadPool(2, task -> {
         Thread thread = new Thread(task, "course-video-compatibility-converter");
         thread.setDaemon(true);
         return thread;
@@ -176,6 +179,20 @@ public class ProtectedVideoService
     {
         String value = normalizeSource(source);
         if (value.length() == 0 || isCompatibilityReady(value)) return;
+        String key;
+        try
+        {
+            key = cacheKey(value);
+            // Remember the Android-compatible output request while HLS is
+            // still being generated. The HLS worker consumes this marker and
+            // schedules the MP4 remux immediately after a successful build.
+            COMPATIBILITY_REQUESTED.add(key);
+        }
+        catch (Exception error)
+        {
+            System.err.println("Protected MP4 compatibility request failed: " + safeFailure(error));
+            return;
+        }
         if (!isReady(value))
         {
             prepareAsync(value);
@@ -183,7 +200,6 @@ public class ProtectedVideoService
         }
         try
         {
-            String key = cacheKey(value);
             if (!COMPATIBILITY_QUEUED.add(key)) return;
             COMPATIBILITY_FAILURES.remove(key);
             COMPATIBILITY_CONVERTER.submit(() -> {
@@ -191,6 +207,7 @@ public class ProtectedVideoService
                 {
                     if (!isCompatibilityReady(value)) generateCompatibilityFile(value);
                     COMPATIBILITY_FAILURES.remove(key);
+                    COMPATIBILITY_REQUESTED.remove(key);
                 }
                 catch (Exception error)
                 {
@@ -334,7 +351,20 @@ public class ProtectedVideoService
 
     public void prepareSourcesAsync(Object value)
     {
-        collectVideoSources(value, "").forEach(source -> schedule(source, false));
+        collectVideoSources(value, "").forEach(source -> {
+            String normalized = normalizeSource(source);
+            if (normalized.length() == 0) return;
+            try
+            {
+                COMPATIBILITY_REQUESTED.add(cacheKey(normalized));
+            }
+            catch (Exception ignored)
+            {
+                return;
+            }
+            if (isReady(normalized)) prepareCompatibilityAsync(normalized);
+            else schedule(normalized, false);
+        });
     }
 
     /**
@@ -364,6 +394,7 @@ public class ProtectedVideoService
                     if (!ownsConversion) return;
                     generate(value, key);
                     FAILURES.remove(key);
+                    if (COMPATIBILITY_REQUESTED.contains(key)) prepareCompatibilityAsync(value);
                 }
                 catch (Exception e)
                 {
